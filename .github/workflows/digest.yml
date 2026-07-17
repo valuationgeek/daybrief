@@ -1,0 +1,84 @@
+# Run daybrief entirely in the cloud on a schedule — no always-on machine needed.
+#
+# Cloud profile: llm.provider=openai (runners have no Ollama), Obsidian off,
+# email on (+ Telegram if its secrets are set). The SQLite database is persisted
+# between runs with actions/cache so dedupe and trend detection keep working.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   OPENAI_API_KEY            — key for any OpenAI-compatible API
+#   DAYBRIEF_EMAIL_ADDRESS    — SMTP username / from-address
+#   DAYBRIEF_SMTP_PASSWORD    — SMTP app password
+# Optional secrets:
+#   DAYBRIEF_EMAIL_TO         — comma-separated recipients (defaults to EMAIL_ADDRESS)
+#   DAYBRIEF_TELEGRAM_BOT_TOKEN / DAYBRIEF_TELEGRAM_CHAT_ID
+#   NYT_API_KEY / NEWSDATA_API_KEY
+#
+# Scheduled runs are commented out by default — uncomment `schedule:` to enable.
+
+name: Daily digest
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "30 6 * * *"   # 06:30 UTC daily — adjust to your morning
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore article database
+        uses: actions/cache@v4
+        with:
+          path: db/news.sqlite
+          # run_id makes the key unique so the updated DB is saved after
+          # every run; restore-keys picks up the most recent previous one.
+          key: daybrief-db-${{ github.run_id }}
+          restore-keys: daybrief-db-
+
+      - name: Build headless settings from the example config
+        env:
+          DAYBRIEF_EMAIL_ADDRESS: ${{ secrets.DAYBRIEF_EMAIL_ADDRESS }}
+          DAYBRIEF_EMAIL_TO: ${{ secrets.DAYBRIEF_EMAIL_TO }}
+          DAYBRIEF_TELEGRAM_BOT_TOKEN: ${{ secrets.DAYBRIEF_TELEGRAM_BOT_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, shutil, yaml
+
+          s = yaml.safe_load(open("config/settings.example.yaml", encoding="utf-8"))
+          s["llm"]["provider"] = "openai"
+          s["obsidian"]["enabled"] = False
+
+          addr = os.environ.get("DAYBRIEF_EMAIL_ADDRESS", "")
+          to = os.environ.get("DAYBRIEF_EMAIL_TO") or addr
+          email = s["email"]
+          email["enabled"] = bool(addr)
+          email["smtp"]["username"] = addr
+          email["from_address"] = addr
+          email["to_addresses"] = [a.strip() for a in to.split(",") if a.strip()]
+
+          s["telegram"]["enabled"] = bool(os.environ.get("DAYBRIEF_TELEGRAM_BOT_TOKEN"))
+
+          yaml.safe_dump(s, open("config/settings.yaml", "w", encoding="utf-8"),
+                         allow_unicode=True, sort_keys=False)
+          shutil.copy("config/watchlist.example.yaml", "config/watchlist.yaml")
+          print("Headless settings written.")
+          PY
+
+      - name: Run pipeline
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DAYBRIEF_SMTP_PASSWORD: ${{ secrets.DAYBRIEF_SMTP_PASSWORD }}
+          DAYBRIEF_TELEGRAM_BOT_TOKEN: ${{ secrets.DAYBRIEF_TELEGRAM_BOT_TOKEN }}
+          DAYBRIEF_TELEGRAM_CHAT_ID: ${{ secrets.DAYBRIEF_TELEGRAM_CHAT_ID }}
+          NYT_API_KEY: ${{ secrets.NYT_API_KEY }}
+          NEWSDATA_API_KEY: ${{ secrets.NEWSDATA_API_KEY }}
+        run: python main.py

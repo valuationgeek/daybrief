@@ -1,0 +1,68 @@
+---
+date: {{ today }}
+created: {{ created }}
+tags: [news, digest]
+total_articles: {{ total_articles }}
+clusters: {{ total_clusters }}
+breaking: {{ breaking_count }}
+---
+
+# Daily Digests — {{ title_dt }}
+
+> {{ total_articles }} articles · {{ total_clusters }} cross-source clusters · {{ breaking_count }} breaking
+
+---
+
+## 💡 Key Insights & Alerts
+
+{% for insight in insights -%}
+- {{ insight }}
+{% endfor %}
+---
+
+{% for cat in categories %}
+{% if cat.total or cat.clusters or cat.solo_articles %}
+## {{ cat.label }} *({{ cat.total }})*
+{% if cat.clusters %}
+
+### 🔗 Cross-Source Stories
+{% for cluster in cat.clusters %}
+#### {{ flag_emoji(cluster.flags) }} {{ cluster.top_keywords[0] if cluster.top_keywords else 'Event' }} · {{ cluster.source_count }} sources
+**Summary:** {{ cluster.unified_summary }}
+**Sources:** {% for s in cluster.sources %}*{{ s }}*{% if not loop.last %}, {% endif %}{% endfor %}
+**Tags:** {% for kw in cluster.top_keywords[:5] %}`{{ kw }}`{% if not loop.last %} · {% endif %}{% endfor %} · **Score:** {{ "%.2f"|format(cluster.score) }}{% if 'BREAKING' in cluster.flags %} 🔴{% elif 'PRIORITY' in cluster.flags %} 🟡{% endif %}
+
+| Source | Title |
+|--------|-------|
+{% for title, source, url in zip(cluster.titles, cluster.sources, cluster.urls) -%}
+| *{{ source }}* | [{{ title[:90] }}]({{ url }}) |
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+{% if cat.solo_articles %}
+### 📄 Stories
+{% for article in cat.solo_articles %}
+#### {{ flag_emoji(article.flags) }} [{{ article.title }}]({{ article.url }})
+{{ sentiment_emoji(article.sentiment_label) }} *{{ article.source }}* · {{ article.published[:10] }} · Score {{ "%.2f"|format(article.score or 0) }}
+**Summary:** {{ article.summary or article.body[:300] }}
+{% if article.read_angle %}**Read Angle:** {{ article.read_angle }}{% endif %}
+{% if article.keywords %}**Tags:** {% for kw in article.keywords[:5] %}`{{ kw }}`{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+
+{% endfor %}
+{% endif %}
+---
+{% endif %}
+{% endfor %}
+
+## 📈 Trending Keywords
+
+| Keyword | Today | Avg | Spike |
+|---------|------:|----:|------:|
+{% for t in trends -%}
+| {{ t.keyword }} | {{ t.today_count }} | {{ t.historical_mean }} | {{ t.spike_factor }}× |
+{% else %}
+| *No keyword spikes above baseline today* | | | |
+{% endfor %}
+
+*[[{{ filename }}]] · [[{{ index_filename }}]]*

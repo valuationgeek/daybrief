@@ -1,0 +1,107 @@
+# ─────────────────────────────────────────────────────────────
+# News Sources Configuration
+# Category ORDER here = display order in email and Obsidian.
+# ─────────────────────────────────────────────────────────────
+
+# ── RSS FEEDS ─────────────────────────────────────────────────
+
+rss_feeds:
+
+  # 1st — Top Stories (formerly "Breaking News")
+  breaking:
+    label: "Top Stories"
+    feeds:
+      - url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362"
+        source: "CNBC World Top News"
+        credibility: 0.92
+        language: "en"
+
+  # 2nd — Business & Finance
+  business:
+    label: "Business & Finance"
+    feeds:
+      - url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=yhoo,goog&region=US&lang=en-US"
+        source: "Yahoo Finance"
+        credibility: 0.85
+        language: "en"
+      - url: "https://www.cgtn.com/subscribe/rss/section/business.xml"
+        source: "CGTN Business"
+        credibility: 0.92
+        language: "en"
+      - url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"
+        source: "CNBC Finance"
+        credibility: 0.92
+        language: "en"
+      - url: "https://rthk9.rthk.hk/rthk/news/rss/e_expressnews_efinance.xml"
+        source: "RTHK Finance"
+        credibility: 0.90
+        language: "en"          # Chinese — kept as-is, no translation
+
+  # 3rd — World Headlines
+  world:
+    label: "World Headlines"
+    feeds:
+      - url: "https://www.cgtn.com/subscribe/rss/section/china.xml"
+        source: "CGTN"
+        credibility: 0.92
+        language: "en"
+      - url: "https://feeds.bbci.co.uk/news/rss.xml"
+        source: "BBC News"
+        credibility: 0.90
+        language: "en"
+      - url: "https://www.fso.gov.hk/rss/fsblog_rss_e.xml"
+        source: "HK Government"
+        credibility: 0.95
+        language: "en"
+      - url: "https://rthk9.rthk.hk/rthk/news/rss/e_expressnews_elocal.xml"
+        source: "RTHK"
+        credibility: 0.90
+        language: "en"
+      - url: "https://rthk9.rthk.hk/rthk/news/rss/e_expressnews_egreaterchina.xml"
+        source: "RTHK"
+        credibility: 0.90
+        language: "en"
+        
+  # 4th — Tech & AI
+  tech:
+    label: "Tech & AI"
+    feeds:
+      - url: "https://feeds.bbci.co.uk/news/technology/rss.xml"
+        source: "BBC Technology"
+        credibility: 0.90
+        language: "en"
+      - url: "https://techcrunch.com/feed/"
+        source: "TechCrunch"
+        credibility: 0.88
+        language: "en"
+
+
+# ── APIS ──────────────────────────────────────────────────────
+
+apis:
+
+  # New York Times — World Top Stories only
+  # Get a free key at: https://developer.nytimes.com
+  nytimes:
+    enabled: true
+    # Secret — set NYT_API_KEY in .env (see .env.example)
+    key: "${NYT_API_KEY:-YOUR_NYT_API_KEY}"
+    endpoints:
+      world:        true    # NYT World Top Stories → "World Headlines"
+      most_emailed: false   # disabled
+    max_results: 10
+
+  # NewsData.io — Market / Finance news
+  # Get a free key at: https://newsdata.io
+  newsdata:
+    enabled: true
+    # Secret — set NEWSDATA_API_KEY in .env (see .env.example)
+    key: "${NEWSDATA_API_KEY:-YOUR_NEWSDATA_API_KEY}"
+    max_results: 10
+
+
+# ── LIMITS ────────────────────────────────────────────────────
+limits:
+  max_articles_per_feed: 10
+  max_age_hours: 12
+  fetch_timeout_seconds: 20

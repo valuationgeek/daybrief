@@ -1,0 +1,90 @@
+# ─────────────────────────────────────────────
+# daybrief — Output & Integration Configuration
+#
+# Copy this file to settings.yaml and fill in your values:
+#     cp config/settings.example.yaml config/settings.yaml
+#
+# Secrets (passwords, API keys, tokens) go in a gitignored .env file
+# at the project root — see .env.example. The ${VAR} placeholders below
+# are filled from those environment variables at load time.
+# ─────────────────────────────────────────────
+
+obsidian:
+  enabled: true
+  # Folder where Markdown digests are written. Point it at a folder inside
+  # your Obsidian vault to get daily notes there, e.g.:
+  #   Windows: "C:/Users/you/Documents/MyVault/News"
+  #   macOS:   "/Users/you/Documents/MyVault/News"
+  #   Linux:   "/home/you/vault/News"
+  # The default writes inside the project folder — works even without Obsidian.
+  vault_path: "output/obsidian"
+  # Subfolder for daily notes (created if missing)
+  subfolder: "Daily Digests"
+  # Name of the running index file (created in the same subfolder)
+  index_filename: "0_index"
+  # Whether to also maintain a running index file
+  write_index: true
+
+email:
+  enabled: false
+  # "smtp" uses Gmail / any SMTP server; "sendgrid" uses the SendGrid API
+  provider: "smtp"
+  smtp:
+    host: "smtp.gmail.com"
+    port: 587
+    username: "you@example.com"
+    # For Gmail use an App Password, not your real password:
+    # https://myaccount.google.com/apppasswords
+    # Secret — set DAYBRIEF_SMTP_PASSWORD in .env (see .env.example)
+    password: "${DAYBRIEF_SMTP_PASSWORD:-}"
+  sendgrid:
+    # Secret — set SENDGRID_API_KEY in .env (see .env.example)
+    api_key: "${SENDGRID_API_KEY:-}"
+  from_address: "you@example.com"
+  to_addresses:
+    - "you@example.com"
+  subject_template: "📰 Daily Brief — {date}"
+  # How many items to show per category in the email
+  display:
+    max_clusters_per_category: 5    # cross-source story groups per section
+    max_articles_per_category: 10   # individual solo articles per section
+
+telegram:
+  enabled: false
+  # Create a bot via @BotFather; get your chat ID by messaging @userinfobot
+  # Secrets — set both in .env (see .env.example)
+  bot_token: "${DAYBRIEF_TELEGRAM_BOT_TOKEN:-}"
+  chat_id: "${DAYBRIEF_TELEGRAM_CHAT_ID:-}"
+  # Whether to send immediate alerts for breaking news
+  send_breaking_immediately: true
+
+llm:
+  # "ollama" = local, free   |   "openai" = any OpenAI-compatible API (paid,
+  # higher quality; also the option for headless/cloud runs without Ollama)
+  provider: "ollama"
+  ollama:
+    # Change base_url if Ollama runs on another machine or in a container
+    base_url: "http://localhost:11434"
+    model: "llama3.2"                # or mistral, phi3:mini, gemma2:2b …
+    timeout: 60
+  openai:
+    # Leave base_url blank for api.openai.com, or point it at any other
+    # OpenAI-compatible endpoint, e.g.:
+    #   OpenRouter: "https://openrouter.ai/api/v1"
+    #   Groq:       "https://api.groq.com/openai/v1"
+    #   vLLM / LM Studio: your local server's /v1 URL
+    base_url: ""
+    model: "gpt-4.1-mini"            # any model name your endpoint serves
+    # Secret — set OPENAI_API_KEY in .env (see .env.example)
+    api_key: "${OPENAI_API_KEY:-}"
+
+# General agent settings
+agent:
+  # IANA timezone used for digest timestamps (e.g. "Europe/Berlin")
+  timezone: "UTC"
+  # Log level: DEBUG | INFO | WARNING | ERROR
+  log_level: "INFO"
+  # Relative path from project root — works on Windows and Linux
+  log_file: "logs/agent.log"
+  # Keep article history in the local database for this many days
+  history_days: 90

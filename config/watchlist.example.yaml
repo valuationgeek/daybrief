@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────
+# daybrief — Personal watchlist
+#
+# Copy this file to watchlist.yaml and edit to match your interests:
+#     cp config/watchlist.example.yaml config/watchlist.yaml
+#
+# Articles matching a topic or company get a full watchlist score boost;
+# region matches get a partial boost (see sources.yaml → scoring.weights
+# for how much the watchlist component contributes to the final score).
+# ─────────────────────────────────────────────
+
+# Topics of interest (case-insensitive substring match)
+topics:
+  - artificial intelligence
+  - interest rates
+  - climate change
+  - cybersecurity
+
+# Company names to watch
+companies:
+  - Apple
+  - NVIDIA
+  - Microsoft
+
+# Geographic regions of high interest
+regions:
+  - United States
+  - Europe
+
+# Notification thresholds
+alerts:
+  # Send a Telegram alert immediately if an article scores >= this
+  immediate_telegram_threshold: 0.90
+  # Minimum items for the email digest to send (skip if fewer)
+  min_items_for_email: 5

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>News Digest — {{ today }}</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background:#f5f5f5;margin:0;padding:20px;color:#1a1a1a}
+  .container{max-width:680px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+  .header{background:#1a1a2e;color:#fff;padding:28px 32px}
+  .header h1{margin:0 0 6px;font-size:22px;font-weight:600}
+  .header .meta{font-size:13px;color:#aaa}
+  .stats{display:flex;gap:24px;margin-top:16px}
+  .stat .num{font-size:24px;font-weight:700;color:#fff}
+  .stat .lbl{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px}
+  .insights{background:#f0f7ff;border-left:4px solid #3b82f6;padding:16px 20px;margin:20px 24px;border-radius:0 8px 8px 0}
+  .insights h2{font-size:14px;font-weight:600;margin:0 0 10px;color:#1e40af}
+  .insights ul{margin:0;padding:0 0 0 18px}
+  .insights li{font-size:13px;color:#374151;margin-bottom:6px}
+  .cat-section{padding:20px 24px 0}
+  .cat-header{font-size:18px;font-weight:700;color:#1a1a2e;padding-bottom:10px;border-bottom:2px solid #e5e7eb;margin-bottom:16px}
+  /* Cluster */
+  .cluster{background:#fafafa;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:14px}
+  .cluster-tag{display:inline-block;background:#dbeafe;color:#1e40af;font-size:11px;padding:2px 8px;border-radius:20px;margin-bottom:8px}
+  .cluster h3{font-size:15px;font-weight:600;margin:0 0 8px;color:#111}
+  .cluster .lbl{font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 2px}
+  .cluster .body-text{font-size:13px;color:#374151;line-height:1.6;margin:0 0 8px}
+  .cluster .impact-text{font-size:13px;color:#1e40af;line-height:1.5;margin:0 0 10px}
+  .cluster-sources{margin-top:10px;border-top:1px solid #e5e7eb;padding-top:8px}
+  .cluster-sources table{width:100%;border-collapse:collapse;font-size:12px}
+  .cluster-sources td{padding:3px 6px;vertical-align:top;color:#374151}
+  .cluster-sources td:first-child{color:#6b7280;white-space:nowrap;width:120px;font-weight:500}
+  .cluster-sources a{color:#1a1a2e;text-decoration:none}
+  .cluster-sources a:hover{color:#3b82f6;text-decoration:underline}
+  /* Solo article */
+  .article{padding:12px 0;border-bottom:1px solid #f0f0f0}
+  .article:last-child{border-bottom:none}
+  .article a{color:#1a1a2e;font-weight:600;font-size:14px;text-decoration:none}
+  .article a:hover{color:#3b82f6}
+  .article .meta{font-size:12px;color:#6b7280;margin:4px 0}
+  .article .lbl{font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;margin:6px 0 2px}
+  .article .body-text{font-size:13px;color:#374151;line-height:1.5}
+  .article .impact-text{font-size:13px;color:#1e40af;line-height:1.5}
+  /* Badges & tags */
+  .badge{display:inline-block;padding:2px 7px;border-radius:12px;font-size:11px;font-weight:500;margin-right:4px}
+  .badge.breaking{background:#fee2e2;color:#991b1b}
+  .badge.priority{background:#fef3c7;color:#92400e}
+  .badge.neg{background:#fee2e2;color:#991b1b}
+  .badge.pos{background:#d1fae5;color:#065f46}
+  .badge.neu{background:#f3f4f6;color:#374151}
+  .tags{margin-top:6px}
+  .tag{display:inline-block;background:#e5e7eb;color:#374151;font-size:11px;padding:1px 6px;border-radius:4px;margin-right:3px}
+  /* Trends */
+  .trends{background:#f8fafc;padding:20px 24px;margin-top:10px}
+  .trends h2{font-size:16px;font-weight:700;color:#1a1a2e;margin:0 0 12px}
+  .trend-row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #e5e7eb;font-size:13px}
+  .trend-kw{font-weight:500;color:#1a1a2e}
+  .trend-spike{color:#059669;font-weight:600}
+  .footer{text-align:center;padding:20px;font-size:12px;color:#9ca3af;background:#f9fafb}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <h1>📰 Daily News Digest</h1>
+    <div class="meta">{{ generated_at }}</div>
+    <div class="stats">
+      <div class="stat"><div class="num">{{ total_articles }}</div><div class="lbl">Articles</div></div>
+      <div class="stat"><div class="num">{{ breaking_count }}</div><div class="lbl">Breaking</div></div>
+      <div class="stat"><div class="num">{{ categories | length }}</div><div class="lbl">Categories</div></div>
+    </div>
+  </div>
+
+  {% if insights %}
+  <div class="insights">
+    <h2>💡 Key Insights</h2>
+    <ul>{% for i in insights %}<li>{{ i }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  {% for cat in categories %}
+  {% if cat.clusters or cat.solo_articles %}
+  <div class="cat-section">
+    <div class="cat-header">{{ cat.label }}</div>
+
+    {# ── Cross-source clusters ── #}
+    {% for cluster in cat.clusters %}
+    <div class="cluster">
+      <span class="cluster-tag">{{ cluster.source_count }} sources</span>
+      {% if 'BREAKING' in cluster.flags %}<span class="badge breaking">🔴 BREAKING</span>{% elif 'PRIORITY' in cluster.flags %}<span class="badge priority">🟡 PRIORITY</span>{% endif %}
+      <h3>{{ cluster.top_keywords[0] | capitalize if cluster.top_keywords else 'Multi-source Story' }}</h3>
+      <div class="lbl">Summary</div>
+      <div class="body-text">{{ cluster.unified_summary }}</div>
+      {% if cluster.top_keywords %}
+      <div class="tags">{% for kw in cluster.top_keywords[:5] %}<span class="tag">{{ kw }}</span>{% endfor %}</div>
+      {% endif %}
+      {# Source table with links — Fix #6 #}
+      <div class="cluster-sources">
+        <table>
+          {% for title, source, url in zip(cluster.titles, cluster.sources, cluster.urls) %}
+          <tr>
+            <td>{{ source }}</td>
+            <td><a href="{{ url }}">{{ title[:80] }}</a></td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </div>
+    {% endfor %}
+
+    {# ── Solo articles ── #}
+    {% for article in cat.solo_articles %}
+    <div class="article">
+      {% if 'BREAKING' in article.flags %}<span class="badge breaking">🔴 BREAKING</span>
+      {% elif 'PRIORITY' in article.flags %}<span class="badge priority">🟡 PRIORITY</span>{% endif %}
+      <span class="badge {{ sentiment_class(article.sentiment_label) }}">{{ article.sentiment_label or 'neutral' }}</span>
+      <div><a href="{{ article.url }}">{{ article.title }}</a></div>
+      <div class="meta">{{ article.source }} · {{ article.published[:10] }}</div>
+      {% if article.summary %}
+      <div class="lbl">Summary</div>
+      <div class="body-text">{{ article.summary }}</div>
+      {% endif %}
+      {% if article.read_angle %}
+      <div class="lbl">Read Angle</div>
+      <div class="impact-text">{{ article.read_angle }}</div>
+      {% endif %}
+      {% if article.keywords %}
+      <div class="tags">{% for kw in article.keywords[:5] %}<span class="tag">{{ kw }}</span>{% endfor %}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endfor %}
+
+  {% if trends %}
+  <div class="trends">
+    <h2>📈 Trending Keywords</h2>
+    {% for t in trends %}
+    <div class="trend-row">
+      <span class="trend-kw">{{ t.keyword }}</span>
+      <span class="trend-spike">{{ t.spike_factor }}× · {{ t.today_count }} mentions</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="footer">
+    daybrief · {{ today }} · Powered by Ollama + sentence-transformers
+  </div>
+
+</div>
+</body>
+</html>

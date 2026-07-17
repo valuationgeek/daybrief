@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE config files
+.vscode/
+.idea/
+.claude/
+
+# Operating system files
+Thumbs.db
+.DS_Store
+
+# Secret files (API keys and passwords)
+.env
+
+# Personal config — copy the .example.yaml files instead
+config/settings.yaml
+config/watchlist.yaml
+
+# Runtime data (created automatically on first run)
+db/
+logs/
+output/

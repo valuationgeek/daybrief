@@ -1,0 +1,101 @@
+# ═════════════════════════════════════════════════════════════
+# sources.yaml — Scoring configuration
+# ═════════════════════════════════════════════════════════════
+
+# ── Source credibility scores (0.0 = unreliable, 1.0 = highly trusted) ───────
+sources:
+  "HK Government":     0.92
+  "RTHK":              0.90
+  "BBC News":          0.90
+  "CNBC":              0.92
+  "CGTN":              0.92
+  "MarketWatch":       0.88
+  "Yahoo Finance":     0.85
+  "Sina Finance":      0.85
+  "TechCrunch":        0.88
+  "NYT Most Emailed":  0.90
+  "NYT World":         0.90
+  "NewsData":          0.75
+  "default":           0.60   # fallback for any unlisted source
+
+
+# ── Composite score weights ───────────────────────────────────────────────────
+# Each component contributes a value between 0.0 and 1.0.
+# Multiply by its weight, sum them all → final article score (0.0–1.0).
+# Rule: all weights MUST add up to exactly 1.0.
+#
+# Component reference:
+#   source_credibility  — how trusted the outlet is (from the table above)
+#   recency             — how fresh the article is (decays over max_age_hours)
+#   watchlist_match     — whether it matches your topics/companies in watchlist.yaml
+#   sentiment_magnitude — how strong the emotional tone is (strong = newsworthy)
+#   cluster_size        — how many outlets are covering the same story
+#
+# To INCREASE importance of a factor → raise its weight, lower others to compensate.
+# To REMOVE a factor entirely → set its weight to 0.0 and add its value to another.
+# To ADD a new factor → implement it in scorer.py, add an entry here.
+
+scoring:
+  weights:
+    source_credibility:  0.30   # most trusted outlets score higher
+    recency:             0.25   # fresher articles score higher
+    watchlist_match:     0.25   # your personal topics get a boost
+    sentiment_magnitude: 0.15   # strong tone (pos or neg) = more newsworthy
+    cluster_size:        0.05   # covered by many outlets = more significant
+
+
+# ── Score barriers — minimum score to appear in output ───────────────────────
+# Articles scoring BELOW the barrier for their category are silently filtered
+# out of both the email and Obsidian output. They are still stored in the DB.
+# Clusters (multi-source) always use the highest barrier across their categories.
+# Set a category to 0.0 to show everything; set to 1.0 to show nothing.
+#
+# Category keys must match the keys in config/feeds.yaml → rss_feeds.
+
+  score_barriers:
+    world:    0.55   # World Headlines    — show score >= 0.55
+    breaking: 0.60   # Breaking News      — show score >= 0.60
+    business: 0.48   # Business & Finance — show score >= 0.48
+    tech:     0.45   # Tech & AI          — show score >= 0.45
+    default:  0.40   # fallback for any category not listed above
+
+
+# ── Flag thresholds ───────────────────────────────────────────────────────────
+  breaking_threshold: 0.82   # score >= this → 🔴 BREAKING flag
+  priority_threshold: 0.70   # score >= this → 🟡 PRIORITY flag
+
+
+# ── Output display limits ─────────────────────────────────────────────────────
+  # Per-category solo article limits for Obsidian and email output.
+  # Clusters are always shown in full ABOVE these limits.
+  # Add any category key from feeds.yaml here to override the default.
+  max_solo_per_category:
+    breaking: 8    # Top Stories
+    business: 18    # Business & Finance
+    world:    6     # World Headlines
+    tech:     8     # Tech & AI
+    default:  5     # fallback for any category not listed above
+
+
+# ── Insight generation ────────────────────────────────────────────────────────
+# Categories watched for the "market caution" insight (3+ negative-tone
+# stories in one of these categories triggers it). Remove or rename entries
+# to match your own categories; categories that don't exist simply never fire.
+insights:
+  market_signal_categories:
+    - business
+  min_negative_for_caution: 3
+
+
+# ── Trend detection ───────────────────────────────────────────────────────────
+# A keyword is "trending" when today's mention count is well above its recent
+# daily baseline. baseline = (total mentions over the last `lookback_days`,
+# excluding today) / lookback_days, so days the keyword didn't appear count as
+# zero. spike_factor = today_count / (baseline + baseline_smoothing).
+# A keyword is reported when today_count >= min_frequency AND
+# spike_factor >= min_spike_factor.
+trends:
+  lookback_days:      14     # size of the baseline window (days)
+  min_frequency:      2      # keyword must appear at least this many times today
+  min_spike_factor:   2.0    # today must be >= this multiple of its baseline
+  baseline_smoothing: 0.5    # damps brand-new keywords; higher = stricter
