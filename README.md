@@ -4,6 +4,10 @@
 
 No SaaS, no subscription, no data leaving your machine (unless you opt into a cloud LLM API).
 
+<p align="center">
+  <img src="docs/screenshot-email-digest.png" alt="A daybrief morning digest: key insights up top, then scored and summarized top stories with per-article read angles" width="640">
+</p>
+
 ## What it does
 
 - **Collects** from any RSS feeds you configure, plus optional NYT and NewsData.io APIs
