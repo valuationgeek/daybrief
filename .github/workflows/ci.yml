@@ -18,7 +18,8 @@ jobs:
         with:
           python-version: "3.11"
       # The offline test suite only touches light modules (preprocessor,
-      # scorer, config) — no torch/transformers install needed for CI.
-      - run: pip install ruff pytest pyyaml
+      # scorer, config, text, llm, net, email/telegram formatting) — no
+      # torch/transformers install needed for CI.
+      - run: pip install ruff pytest pyyaml httpx jinja2 ollama
       - run: ruff check .
       - run: pytest -q

@@ -4,7 +4,7 @@ daybrief is a linear 6-stage pipeline orchestrated by `main.py:run_pipeline()`. 
 
 | Stage | Module | What it does |
 |---|---|---|
-| 1 | `collector.py` | Fetch RSS feeds + NYT API + NewsData API in one pass. Enriches short bodies via full-page fetch (`trafilatura`). |
+| 1 | `collector.py` | Fetch RSS feeds + NYT API + NewsData API in one pass (timeouts + retry via `net.py`). Re-fetches bodies under `limits.enrich_below_chars` from the full page (`trafilatura`). |
 | 2 | `preprocessor.py` | Clean boilerplate, dedupe (content hash), drop short/empty, normalize dates. |
 | 3 | `analyzer.py` | Per-article LLM summary + "read angle" (audience/impact sentence), KeyBERT keywords, VADER sentiment. Parallelized via `ThreadPoolExecutor`. |
 | 4 | `fusion.py` | Embed all articles (`sentence-transformers`), greedy single-linkage clustering across **all** categories, LLM-generated unified cross-source summary per multi-article cluster. |
@@ -22,6 +22,9 @@ Outputs live in `agent/outputs/` (`obsidian.py`, `email_digest.py`, `telegram_bo
 - **Non-English articles bypass the LLM.** In `analyzer.py`, articles with `language != "en"` keep their original text (no translation) and get a blank read angle.
 - **The Ollama client bypasses the system proxy.** Always create it via `agent/ollama_client.py:make_client()` (`trust_env=False`) — this fixes HTTP 502 errors behind a VPN/corporate proxy. Don't instantiate `ollama.Client` directly.
 - **The LLM provider is switchable.** `settings.yaml:llm.provider` is `"ollama"` (local, default) or `"openai"` (any OpenAI-compatible endpoint via `llm.openai.base_url`). The single branch point is `agent/llm.py:generate()`, which returns `""` on failure — each caller has its own degradation path (analyzer falls back to lead sentences, fusion to joined summaries). Keep both provider paths working when editing prompts.
+- **No unbounded network call.** Every outbound call has an explicit timeout: a half-open socket with no timeout hangs the run forever, and `main.py`'s `finally` then never writes the `run_log` row. Collector fetches go through `agent/net.py:with_retry()`, which retries transient transport errors but never HTTP status errors. The Ollama client, OpenAI client and SMTP connection all carry configured timeouts.
+- **Outputs are isolated.** `main.py` runs each output through `run_output()`, so one failing channel doesn't skip the others or maintenance. Articles are already in the DB by then, and the next run dedupes them away, so a skipped output is lost for good. Output errors are re-raised together at the end, so `run_log` still records `error`.
+- **LLM output is cleaned deterministically.** `agent/text.py` strips meta-commentary, removes ungrounded "former"/"late" descriptors, and trims a dangling sentence when a provider stops on its token cap. Token caps are in tokens, not words, so keep them well above the prompt's word limit.
 
 ## Categories
 
