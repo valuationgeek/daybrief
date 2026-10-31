@@ -108,12 +108,17 @@ _DOTTED_RE = re.compile(
 )
 # Next char must be a capital letter, not a digit — otherwise "Oct. 10" would
 # still split for any abbreviation missing from the list above.
-_SENT_END_RE = re.compile(r"(?<=[.!?])[\"')\]]?\s+(?=[\"'(\[]?[A-Z])")
+# Quotes include the curly forms (” ’ “ ‘), which preprocessing keeps. A
+# closing quote/bracket sits in the lookbehind, so the split consumes only the
+# whitespace — consuming it would cut the quote off the sentence it closes.
+_SENT_END_RE = re.compile(
+    r"(?:(?<=[.!?][\"'”’)\]])|(?<=[.!?]))\s+(?=[\"'“‘(\[]?[A-Z])"
+)
 # A decimal point ("$18.63", "3.7%") is never a sentence boundary.
 _DECIMAL_RE = re.compile(r"(?<=\d)\.(?=\d)")
 # Sentence terminator: must end the string or be followed by whitespace,
 # optionally through a closing quote/bracket.
-_TERMINATOR_RE = re.compile(r"[.!?][\"')\]]?(?=\s|$)")
+_TERMINATOR_RE = re.compile(r"[.!?][\"'”’)\]]?(?=\s|$)")
 _DOT_MASK = "\x00"   # never occurs in article text
 
 

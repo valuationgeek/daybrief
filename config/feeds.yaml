@@ -35,7 +35,7 @@ rss_feeds:
       - url: "https://rthk9.rthk.hk/rthk/news/rss/e_expressnews_efinance.xml"
         source: "RTHK Finance"
         credibility: 0.90
-        language: "en"          # Chinese — kept as-is, no translation
+        language: "en"          # e_… feeds are RTHK's English editions
 
   # 3rd — World Headlines
   world:
