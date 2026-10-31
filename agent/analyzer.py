@@ -15,7 +15,6 @@ Language handling:
 """
 
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -23,36 +22,12 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from keybert import KeyBERT
 
 from .llm import generate
+from .text import first_sentences, fix_stale_descriptors, strip_meta
 
 log = logging.getLogger("daybrief.analyzer")
 
 _kbert = None
 _vader = SentimentIntensityAnalyzer()
-
-# Some local models append a meta line like "(Word count: 87 words)" or
-# "Sentiment: + (positive due to ...)" to the summary despite the prompt
-# forbidding it. Strip such lines after generation.
-_WORDCOUNT_RE = re.compile(
-    r"\s*[\(\[]?\s*word\s*count\s*[:=]?\s*\d+\s*(?:words?)?\s*[\)\]]?\.?\s*$",
-    re.IGNORECASE,
-)
-# Line-start anchored: only strips lines that ARE a sentiment verdict, never
-# prose that merely mentions sentiment (e.g. "investor sentiment soured").
-_SENTIMENT_RE = re.compile(r"^\s*[\(\[]?\s*sentiment\s*[:=].*$", re.IGNORECASE)
-_META_RES = [_WORDCOUNT_RE, _SENTIMENT_RE]
-
-
-def _strip_meta(summary: str) -> str:
-    """Remove meta lines (word counts, sentiment verdicts) some local models emit."""
-    if not summary:
-        return summary
-    cleaned = _WORDCOUNT_RE.sub("", summary).rstrip()
-    lines = [
-        ln for ln in cleaned.splitlines()
-        if not any(rx.match(ln.strip()) for rx in _META_RES)
-    ]
-    return "\n".join(lines).strip()
-
 
 def _get_keybert():
     global _kbert
@@ -149,16 +124,17 @@ def _summarize_and_angle(title, body, published=""):
         max_tokens=250,
     )
     if not summary:
-        sentences = [s.strip() for s in body.split(".") if len(s.strip()) > 20]
-        summary   = ". ".join(sentences[:3]) + "."
-    summary = _strip_meta(summary)
+        log.warning(f"No LLM summary — extractive fallback for: {title[:60]}")
+        summary = first_sentences(body) or title
+    summary = strip_meta(summary)
+    summary = fix_stale_descriptors(summary, body)
 
     # Step 2: read angle (uses summary as input — no re-sending full article)
     read_angle = generate(
         _READ_ANGLE_PROMPT.format(summary=summary),
         max_tokens=50,
     )
-    read_angle = _strip_meta(read_angle)
+    read_angle = strip_meta(read_angle)
 
     return summary, read_angle
 
