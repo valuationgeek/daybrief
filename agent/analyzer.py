@@ -21,6 +21,7 @@ from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from keybert import KeyBERT
 
+from . import config
 from .llm import generate
 from .text import first_sentences, fix_stale_descriptors, strip_meta
 
@@ -117,11 +118,16 @@ def _summarize_and_angle(title, body, published=""):
     # body cap ~12000 chars (~2000 words at ~6 chars/word) so long-form pieces
     # still get a fuller summary rather than being cut off at just the
     # opening section.
+    # 400 tokens, not 250: the prompt caps the summary at 150 WORDS, but this
+    # cap is in TOKENS. Ticker- and figure-dense finance text ("(GOOG +1.60%)",
+    # "$18.63 billion") runs ~1.8 tokens/word, so 250 cut summaries off
+    # mid-sentence while they still obeyed the word limit. llm.generate trims
+    # anything that still overruns back to the last full sentence.
     summary = generate(
         _SUMMARY_PROMPT.format(
             title=title, body=body[:12000], date=_pub_date_str(published)
         ),
-        max_tokens=250,
+        max_tokens=400,
     )
     if not summary:
         log.warning(f"No LLM summary — extractive fallback for: {title[:60]}")
@@ -130,9 +136,10 @@ def _summarize_and_angle(title, body, published=""):
     summary = fix_stale_descriptors(summary, body)
 
     # Step 2: read angle (uses summary as input — no re-sending full article)
+    # Same tokens-vs-words trap: a ≤50-word sentence does not fit in 50 tokens.
     read_angle = generate(
         _READ_ANGLE_PROMPT.format(summary=summary),
-        max_tokens=50,
+        max_tokens=100,
     )
     read_angle = strip_meta(read_angle)
 
@@ -200,8 +207,28 @@ def analyze_article(article):
     return article
 
 
+def _fallback_analysis(article):
+    """Fill the analyzer fields with safe defaults when analysis raised, so
+    downstream stages and outputs never see the collector's None summary."""
+    body = article.get("body") or ""
+    article["summary"]         = first_sentences(body) or body[:300] or article.get("title", "")
+    article["read_angle"]      = ""
+    article["impact"]          = ""
+    article["keywords"]        = article.get("keywords") or []
+    article["sentiment"]       = article.get("sentiment") or 0.0
+    article["sentiment_label"] = article.get("sentiment_label") or "neutral"
+    return article
+
+
 def analyze_all(articles, max_workers=3):
     log.info(f"Analyzing {len(articles)} articles...")
+
+    # Load the model once, serially, before the pool starts — otherwise every
+    # worker races on the same cold load and they all hit the timeout together.
+    if config.settings()["llm"].get("provider", "ollama") == "ollama":
+        from .ollama_client import warm_up
+        warm_up()
+
     results = [None] * len(articles)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -212,6 +239,6 @@ def analyze_all(articles, max_workers=3):
                 results[idx] = future.result()
             except Exception as e:
                 log.error(f"Analysis failed for article idx {idx}: {e}")
-                results[idx] = articles[idx]
+                results[idx] = _fallback_analysis(articles[idx])
 
     return [r for r in results if r is not None]
