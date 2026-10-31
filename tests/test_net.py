@@ -50,3 +50,17 @@ def test_reraises_after_all_attempts():
 def test_resolve_timeout_never_none():
     assert net.resolve_timeout() == 7
     assert net.resolve_timeout(3) == 3
+
+
+def test_zero_retry_attempts_still_makes_the_request(monkeypatch):
+    monkeypatch.setattr(config, "feeds", lambda: {"limits": {"retry_attempts": 0}})
+    fn, calls = _flaky(0, TimeoutError("unused"))
+    assert net.with_retry(fn) == "ok"
+    assert calls["n"] == 1
+
+
+def test_unsupported_protocol_is_not_retried():
+    fn, calls = _flaky(5, httpx.UnsupportedProtocol("relative URL"))
+    with pytest.raises(httpx.UnsupportedProtocol):
+        net.with_retry(fn)
+    assert calls["n"] == 1
