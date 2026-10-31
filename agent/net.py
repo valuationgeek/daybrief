@@ -80,13 +80,19 @@ def with_retry(fn, *, attempts=None, base_delay=None, what="request"):
     the remote host.
     """
     lim        = _limits()
-    attempts   = attempts   or lim.get("retry_attempts",   _DEFAULT_ATTEMPTS)
-    base_delay = base_delay or lim.get("retry_base_delay", _DEFAULT_BASE_DELAY)
+    # Clamped: retry_attempts: 0 used to skip the loop entirely and then
+    # `raise None` (TypeError) without ever making the request.
+    attempts   = max(1, int(attempts or lim.get("retry_attempts", _DEFAULT_ATTEMPTS)))
+    base_delay = max(0.0, float(base_delay or lim.get("retry_base_delay", _DEFAULT_BASE_DELAY)))
 
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
             return fn()
+        except httpx.UnsupportedProtocol:
+            # A TransportError subclass, but a malformed or relative URL —
+            # it fails identically on every attempt.
+            raise
         except TRANSIENT_ERRORS as e:
             last_error = e
             if attempt == attempts:

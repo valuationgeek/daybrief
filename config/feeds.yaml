@@ -113,6 +113,9 @@ limits:
   # High by default because RSS bodies are often a truncated lead paragraph;
   # lower it (e.g. 1500) for faster runs at the cost of thinner summaries.
   enrich_below_chars: 9000
-  # Stop full-page fetching after this many consecutive failures (the network
-  # is probably down) and finish the run on the RSS bodies alone.
+  # Full-page fetches run in parallel; non-English articles are never re-fetched.
+  enrich_workers: 4
+  # Stop full-page fetching after this many unreachable hosts in a row (the
+  # network is probably down) and finish the run on the RSS bodies alone.
+  # Paywalls and bot blocks don't count — only requests that got no response.
   enrich_failure_threshold: 8

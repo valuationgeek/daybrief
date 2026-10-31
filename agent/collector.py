@@ -9,30 +9,41 @@ Three sections:
 
 import hashlib
 import logging
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 import feedparser
 import httpx
 import trafilatura
-from trafilatura.settings import use_config
 
 from . import config, db
-from .net import with_retry, resolve_timeout
+from .net import TRANSIENT_ERRORS, with_retry, resolve_timeout
 
 log = logging.getLogger("daybrief.collector")
 
-_traf_cfg_cache = {}
+# Browser-like User-Agent — avoids blocks from sites like CGTN, and the
+# "trafilatura/x.y" default many news sites reject. Used for feeds and pages.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
-
-def _trafilatura_config(timeout):
-    """trafilatura.fetch_url takes its timeout from a config object, not a
-    keyword argument — without this it silently uses the 30s package default
-    and the caller's timeout is ignored."""
-    if timeout not in _traf_cfg_cache:
-        cfg = use_config()
-        cfg.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(int(timeout)))
-        _traf_cfg_cache[timeout] = cfg
-    return _traf_cfg_cache[timeout]
+# Openings of interstitial pages (cookie walls, bot checks, paywall prompts).
+# Specific phrasing, not bare "cookie"/"consent", so a story about a consent
+# decree still gets through.
+_BLOCK_PAGE_RE = re.compile(
+    r"\bcookies?\b.{0,80}\b(?:accept|consent|settings|preferences|policy)\b"
+    r"|\b(?:accept|reject|manage)\b.{0,40}\bcookies?\b"
+    r"|enable javascript|are you a robot|verify you are (?:a )?human"
+    r"|access denied|subscribe to (?:continue|keep) reading|family of brands"
+    r"|privacy (?:settings|choices)",
+    re.IGNORECASE,
+)
+_TITLE_WORD_RE = re.compile(r"[A-Za-z0-9]{4,}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -66,20 +77,166 @@ def _rss_date(entry):
 
 
 def _fetch_body(url, timeout=None):
-    """Fetch and extract an article's full text. Returns "" on failure —
-    an enrichment miss degrades the summary but must never abort the run."""
+    """Fetch and extract an article's full text.
+
+    Returns (text, network_ok). `text` is "" on any miss. `network_ok` is
+    False only when the request never got an HTTP response, even after
+    retries; that is the signal the enrichment circuit breaker counts. A 403
+    paywall, a bot block or an unextractable page is a page-level miss, so
+    network_ok stays True. One paywalled source must not switch enrichment
+    off for every other site.
+
+    Downloaded with httpx rather than trafilatura.fetch_url. fetch_url
+    catches every exception and returns None, so a with_retry around it
+    never fired, and an outage looked exactly like a paywall.
+    """
     timeout = resolve_timeout(timeout)
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return "", True
     try:
-        html = with_retry(
-            lambda: trafilatura.fetch_url(url, config=_trafilatura_config(timeout)),
+        resp = with_retry(
+            lambda: httpx.get(
+                url,
+                headers={"User-Agent": _BROWSER_UA},
+                timeout=timeout,
+                follow_redirects=True,
+            ),
             what=f"body fetch {url}",
         )
-        if html:
-            text = trafilatura.extract(html, include_comments=False, include_tables=False)
-            return text or ""
-    except Exception as e:
+    except httpx.UnsupportedProtocol:
+        return "", True
+    except TRANSIENT_ERRORS as e:
         log.debug(f"Body fetch failed for {url}: {e}")
-    return ""
+        return "", False
+    except Exception as e:   # bad URL, redirect loop, … — a page-level miss
+        log.debug(f"Body fetch failed for {url}: {e}")
+        return "", True
+
+    ctype = resp.headers.get("content-type", "").lower()
+    if resp.status_code >= 400 or (ctype and "html" not in ctype):
+        log.debug(f"Body fetch {url}: HTTP {resp.status_code} {ctype or '?'} — page-level miss")
+        return "", True
+    try:
+        text = trafilatura.extract(
+            resp.content, url=str(resp.url), include_comments=False, include_tables=False
+        )
+    except Exception as e:
+        log.debug(f"Body extraction failed for {url}: {e}")
+        text = None
+    return text or "", True
+
+
+def _usable_body(new, old, title):
+    """True if a fetched page should replace the current body.
+
+    Being longer is not enough. With a high enrichment threshold, most RSS
+    bodies are re-fetched, and a cookie wall or consent page ("Yahoo is part
+    of the Yahoo family of brands…") easily outgrows a good 480-char lead.
+    The summary, keywords and sentiment would then describe the cookie
+    notice. So the page must also mention the headline, and must not open
+    like an interstitial. A rejected page leaves the RSS body as it was.
+    """
+    if not new or len(new) <= len(old or ""):
+        return False
+    if _BLOCK_PAGE_RE.search(new[:600]):
+        return False
+    words = {w.lower() for w in _TITLE_WORD_RE.findall(title or "")}
+    if len(words) >= 2:
+        text = new.lower()
+        if sum(1 for w in words if w in text) < len(words) / 2:
+            return False
+    return True
+
+
+def _enrich_bodies(articles):
+    """Replace short or truncated bodies with the article page's full text.
+
+    The default threshold is ~9000 chars (~1500 words), not 100: RSS
+    <summary> tags are often just a lead paragraph, and when
+    trafilatura.extract() can't clean one up, _fetch_all_rss falls back to
+    raw_summary[:500] — a hard, mid-sentence truncation that a low threshold
+    would miss (495 chars still looks "long enough"). Setting the bar this
+    high means most RSS-only bodies get re-fetched, so the fetches have to be
+    cheap:
+
+    - non-English articles are skipped (their summary only ever uses ~300
+      chars of body, and they bypass the LLM);
+    - each URL is fetched once, even if several feeds carry it;
+    - fetches run in a small thread pool (limits.enrich_workers);
+    - once a host fails at the network level, its remaining URLs are
+      skipped instead of each burning a full timeout plus backoff.
+
+    Circuit breaker: consecutive *network* failures across distinct hosts
+    (limits.enrich_failure_threshold) mean the network itself is down, so
+    enrichment stops and the run finishes on RSS bodies. Any HTTP response,
+    including a 403 paywall, resets the count.
+    """
+    limits    = config.feeds().get("limits", {}) or {}
+    threshold = limits.get("enrich_below_chars", 9000)
+    by_url    = {}
+    for a in articles:
+        if a.get("language", "en") != "en" or len(a.get("body") or "") >= threshold:
+            continue
+        by_url.setdefault(a["url"], []).append(a)
+    if not by_url:
+        return
+
+    workers   = max(1, int(limits.get("enrich_workers", 4)))
+    max_fails = max(1, int(limits.get("enrich_failure_threshold", 8)))
+    timeout   = resolve_timeout()
+    log.info(
+        f"Fetching full text for {len(by_url)} articles with bodies under "
+        f"{threshold} chars ({workers} workers)..."
+    )
+
+    lock       = threading.Lock()
+    down_hosts = set()
+    state      = {"streak": 0, "stopped": False}
+
+    def work(url):
+        with lock:
+            if state["stopped"] or urlparse(url).netloc.lower() in down_hosts:
+                return url, None   # skipped — breaker open or host unreachable
+        return url, _fetch_body(url, timeout)
+
+    replaced = rejected = misses = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for fut in as_completed([pool.submit(work, url) for url in by_url]):
+            url, result = fut.result()
+            if result is None:
+                continue
+            text, network_ok = result
+            if not network_ok:
+                host = urlparse(url).netloc.lower()
+                with lock:
+                    if host not in down_hosts:
+                        down_hosts.add(host)
+                        state["streak"] += 1
+                    if state["streak"] >= max_fails and not state["stopped"]:
+                        state["stopped"] = True
+                        log.warning(
+                            f"Body enrichment stopped after {max_fails} unreachable hosts "
+                            "in a row — network likely down; continuing with RSS bodies"
+                        )
+                continue
+            with lock:
+                state["streak"] = 0
+            if not text:
+                misses += 1
+                continue
+            for a in by_url[url]:
+                if _usable_body(text, a.get("body"), a.get("title")):
+                    a["body"] = text
+                    replaced += 1
+                else:
+                    rejected += 1
+                    log.debug(f"Kept RSS body for {url}: fetched page is shorter, off-topic or an interstitial")
+
+    log.info(
+        f"Enrichment: {replaced} bodies replaced, {rejected} kept (fetched page shorter, "
+        f"off-topic or an interstitial), {misses} page-level misses, "
+        f"{len(down_hosts)} unreachable hosts"
+    )
 
 
 def _blank_article(title, url, source, category, published, body="", credibility=0.80):
@@ -123,12 +280,6 @@ def _fetch_all_rss():
     feed_timeout = resolve_timeout()
     articles     = []
 
-    # Browser-like User-Agent — avoids blocks from sites like CGTN
-    default_ua = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
 
     for cat_key, cat_cfg in rss_cats.items():
         for feed in cat_cfg.get("feeds", []):
@@ -136,16 +287,14 @@ def _fetch_all_rss():
             source      = feed["source"]
             credibility = feed.get("credibility", 0.80)
             language    = feed.get("language", "en")
-            ua          = feed.get("user_agent", default_ua)
+            ua          = feed.get("user_agent", _BROWSER_UA)
             ignore_age  = feed.get("ignore_age", False)
 
             try:
                 # Fetch with httpx rather than letting feedparser download the
                 # URL itself: feedparser.parse(url) has no timeout parameter and
                 # falls back to urllib's default of "block forever", which can
-                # wedge the whole run if the network drops mid-fetch. Passing
-                # the Content-Type header along keeps feedparser's charset
-                # detection for feeds that declare their encoding only there.
+                # wedge the whole run if the network drops mid-fetch.
                 resp = with_retry(
                     lambda: httpx.get(
                         url,
@@ -155,9 +304,19 @@ def _fetch_all_rss():
                     ).raise_for_status(),
                     what=f"[RSS] {source}",
                 )
+                # content-location lets feedparser resolve relative entry links.
+                # The server's Content-Type is deliberately NOT forwarded: per
+                # RFC 3023 its charset overrides the XML declaration, and servers
+                # like RTHK send bare "text/xml" (= us-ascii) for UTF-8 feeds,
+                # which marks them bozo. A fixed charset-less application/xml
+                # defers to the XML's own encoding declaration; omitting the
+                # header entirely would mark every feed bozo ("no Content-type").
                 parsed = feedparser.parse(
                     resp.content,
-                    response_headers={"content-type": resp.headers.get("content-type", "")},
+                    response_headers={
+                        "content-location": str(resp.url),
+                        "content-type":     "application/xml",
+                    },
                 )
 
                 # feedparser returns bozo=True on parse errors but may still
@@ -348,43 +507,5 @@ def collect_all():
 
     log.info(f"Total collected: {len(all_articles)} new articles")
 
-    # Enrich articles with short/missing body via full-page fetch.
-    # The default threshold is ~9000 chars (~1500 words), not 100: RSS
-    # <summary> tags are often just a lead paragraph, and when
-    # trafilatura.extract() can't clean one up, _fetch_all_rss falls back to
-    # raw_summary[:500] — a hard, mid-sentence truncation that a low threshold
-    # would miss (495 chars still looks "long enough"). Setting the bar this
-    # high means most RSS-only bodies get re-fetched from the source page,
-    # trading longer collection time for fuller, untruncated article text.
-    limits     = config.feeds().get("limits", {}) or {}
-    threshold  = limits.get("enrich_below_chars", 9000)
-    needs_body = [a for a in all_articles if len(a.get("body") or "") < threshold]
-    if needs_body:
-        log.info(f"Fetching full text for {len(needs_body)} articles with bodies under {threshold} chars...")
-        timeout = resolve_timeout()
-        # Circuit breaker: each _fetch_body can burn ~14s of backoff before
-        # giving up, so a sustained outage across this many articles would
-        # stall the run for the better part of an hour. A long run of
-        # consecutive failures means the network is down, not that these
-        # particular URLs are bad — stop enriching and finish on RSS bodies.
-        max_consecutive      = limits.get("enrich_failure_threshold", 8)
-        consecutive_failures = 0
-        for i, a in enumerate(needs_body):
-            body = _fetch_body(a["url"], timeout)
-            # Only replace with something longer — a paywall stub or cookie
-            # banner must not overwrite a decent RSS body.
-            if body and len(body) > len(a.get("body") or ""):
-                a["body"] = body
-            if body:
-                consecutive_failures = 0
-            else:
-                consecutive_failures += 1
-                if consecutive_failures >= max_consecutive:
-                    log.warning(
-                        f"Body enrichment aborted after {max_consecutive} consecutive "
-                        f"failures ({i + 1}/{len(needs_body)} processed) — "
-                        "network likely down; continuing with RSS bodies"
-                    )
-                    break
-
+    _enrich_bodies(all_articles)
     return all_articles
