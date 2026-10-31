@@ -194,33 +194,35 @@ def _enrich_bodies(articles):
     state      = {"streak": 0, "stopped": False}
 
     def work(url):
+        host = urlparse(url).netloc.lower()
         with lock:
-            if state["stopped"] or urlparse(url).netloc.lower() in down_hosts:
+            if state["stopped"] or host in down_hosts:
                 return url, None   # skipped — breaker open or host unreachable
-        return url, _fetch_body(url, timeout)
+        text, network_ok = _fetch_body(url, timeout)
+        # Breaker state is updated here in the worker, not in the result loop
+        # below: by the time a result is consumed, the worker may already be
+        # running the next queued URLs, which must see the updated state.
+        with lock:
+            if network_ok:
+                state["streak"] = 0
+            elif host not in down_hosts:
+                down_hosts.add(host)
+                state["streak"] += 1
+                if state["streak"] >= max_fails and not state["stopped"]:
+                    state["stopped"] = True
+                    log.warning(
+                        f"Body enrichment stopped after {max_fails} unreachable hosts "
+                        "in a row — network likely down; continuing with RSS bodies"
+                    )
+        return url, (text, network_ok)
 
     replaced = rejected = misses = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for fut in as_completed([pool.submit(work, url) for url in by_url]):
             url, result = fut.result()
-            if result is None:
-                continue
-            text, network_ok = result
-            if not network_ok:
-                host = urlparse(url).netloc.lower()
-                with lock:
-                    if host not in down_hosts:
-                        down_hosts.add(host)
-                        state["streak"] += 1
-                    if state["streak"] >= max_fails and not state["stopped"]:
-                        state["stopped"] = True
-                        log.warning(
-                            f"Body enrichment stopped after {max_fails} unreachable hosts "
-                            "in a row — network likely down; continuing with RSS bodies"
-                        )
-                continue
-            with lock:
-                state["streak"] = 0
+            if result is None or not result[1]:
+                continue   # skipped, or a network failure (counted in work)
+            text = result[0]
             if not text:
                 misses += 1
                 continue
