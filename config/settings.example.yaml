@@ -42,6 +42,8 @@ email:
   sendgrid:
     # Secret — set SENDGRID_API_KEY in .env (see .env.example)
     api_key: "${SENDGRID_API_KEY:-}"
+    # Seconds before a stalled API request is abandoned
+    timeout: 60
   from_address: "you@example.com"
   to_addresses:
     - "you@example.com"
