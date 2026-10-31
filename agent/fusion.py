@@ -15,8 +15,8 @@ from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from .analyzer import _strip_meta
 from .llm import generate
+from .text import fix_stale_descriptors, strip_meta
 
 log = logging.getLogger("daybrief.fusion")
 
@@ -91,7 +91,7 @@ def _fuse_cluster(cluster_articles):
 
     unified = generate(prompt, max_tokens=300)
     if unified:
-        return _strip_meta(unified)
+        return fix_stale_descriptors(strip_meta(unified), combined)
 
     # LLM unavailable — fall back to joining the individual summaries
     parts = [a.get("summary", "") for a in cluster_articles if a.get("summary")]
