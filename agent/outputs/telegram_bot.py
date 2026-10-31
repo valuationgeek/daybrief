@@ -1,8 +1,13 @@
 """
 outputs/telegram_bot.py — Send digest and breaking alerts to Telegram.
 Uses python-telegram-bot (sync wrapper for simplicity in cron context).
+
+Messages use Telegram's HTML parse mode with every dynamic field escaped.
+Legacy Markdown has no reliable escaping, so a headline containing "_", "*"
+or "[" made Telegram reject the whole message ("can't parse entities").
 """
 
+import html
 import logging
 import asyncio
 from datetime import datetime
@@ -14,7 +19,13 @@ log = logging.getLogger("daybrief.telegram")
 MAX_MSG_LEN = 4096  # Telegram limit
 
 
+def _esc(value) -> str:
+    """Escape any field for HTML parse mode; None becomes ""."""
+    return html.escape(str(value or ""), quote=True)
+
+
 def _flag_icon(flags):
+    flags = flags or []
     if "BREAKING" in flags:
         return "🔴"
     if "PRIORITY" in flags:
@@ -24,82 +35,99 @@ def _flag_icon(flags):
     return "🟢"
 
 
+def _join_within_limit(lines, limit=MAX_MSG_LEN) -> str:
+    """Join lines, dropping whole lines once the limit would be exceeded.
+
+    Each line carries balanced tags, so stopping between lines never leaves
+    an unclosed <b>/<i>/<a> — slicing the finished string could cut one in
+    half and Telegram would reject the message.
+    """
+    out, total = [], 0
+    for line in lines:
+        extra = len(line) + (1 if out else 0)
+        if total + extra > limit:
+            if total + 2 <= limit:
+                out.append("…")
+            break
+        out.append(line)
+        total += extra
+    return "\n".join(out)
+
+
 def _format_article(article: dict) -> str:
-    icon = _flag_icon(article.get("flags", []))
-    title = article.get("title", "No title")
-    source = article.get("source", "?")
-    score = article.get("score", 0)
-    summary = article.get("summary", "")[:200]
-    url = article.get("url", "")
-    sentiment = article.get("sentiment_label", "neutral")
+    icon = _flag_icon(article.get("flags"))
+    title = _esc((article.get("title") or "No title")[:300])
+    source = _esc(article.get("source") or "?")
+    score = article.get("score") or 0
+    summary = _esc((article.get("summary") or "")[:200])
+    url = _esc(article.get("url"))
+    sentiment = article.get("sentiment_label") or "neutral"
     sentiment_icon = {"positive": "😊", "negative": "😟", "neutral": "😐"}.get(sentiment, "😐")
 
     return (
-        f"{icon} *{title}*\n"
-        f"_{source}_ · Score: {score:.2f} · {sentiment_icon}\n"
+        f"{icon} <b>{title}</b>\n"
+        f"<i>{source}</i> · Score: {score:.2f} · {sentiment_icon}\n"
         f"{summary}\n"
-        f"[Read more]({url})"
+        f'<a href="{url}">Read more</a>'
     )
 
 
 def _format_digest(articles, clusters, insights, trends, today) -> str:
     feed_cfg = config.feeds()["categories"]
 
-    lines = [f"📰 *Daily News Digest — {today}*\n"]
+    lines = [f"📰 <b>Daily News Digest — {_esc(today)}</b>\n"]
 
     # Insights first
     if insights:
-        lines.append("*Key Insights*")
-        lines.extend(f"• {i}" for i in insights[:4])
+        lines.append("<b>Key Insights</b>")
+        lines.extend(f"• {_esc(i)}" for i in insights[:4])
         lines.append("")
 
     # Top clusters
-    top_clusters = sorted(clusters, key=lambda c: c.get("score", 0), reverse=True)[:3]
+    top_clusters = sorted(clusters, key=lambda c: c.get("score") or 0, reverse=True)[:3]
     if top_clusters:
-        lines.append("*Top Stories (multi-source)*")
+        lines.append("<b>Top Stories (multi-source)</b>")
         for c in top_clusters:
-            icon = _flag_icon(c.get("flags", []))
-            kw = c.get("top_keywords", ["?"])[0] if c.get("top_keywords") else "?"
+            icon = _flag_icon(c.get("flags"))
+            kw = _esc(c["top_keywords"][0] if c.get("top_keywords") else "?")
             n = c.get("source_count", 1)
-            summary = c.get("unified_summary", "")[:150]
-            lines.append(f"{icon} *{kw}* ({n} sources)\n_{summary}_\n")
+            summary = _esc((c.get("unified_summary") or "")[:150])
+            lines.append(f"{icon} <b>{kw}</b> ({n} sources)\n<i>{summary}</i>\n")
 
     # Per-category top items
     for cat_key, cat_meta in feed_cfg.items():
         cat_articles = [a for a in articles if a["category"] == cat_key]
-        cat_articles = sorted(cat_articles, key=lambda a: a.get("score", 0), reverse=True)
+        cat_articles = sorted(cat_articles, key=lambda a: a.get("score") or 0, reverse=True)
         top = cat_articles[:2]
         if not top:
             continue
-        label = cat_meta["label"]
-        lines.append(f"*{label}*")
+        label = _esc(cat_meta["label"])
+        lines.append(f"<b>{label}</b>")
         for a in top:
-            icon = _flag_icon(a.get("flags", []))
-            title = a.get("title", "?")[:80]
-            source = a.get("source", "?")
-            url = a.get("url", "")
-            lines.append(f"{icon} [{title}]({url}) _{source}_")
+            icon = _flag_icon(a.get("flags"))
+            title = _esc((a.get("title") or "?")[:80])
+            source = _esc(a.get("source") or "?")
+            url = _esc(a.get("url"))
+            lines.append(f'{icon} <a href="{url}">{title}</a> <i>{source}</i>')
         lines.append("")
 
     # Trends
     if trends:
-        lines.append("*Trending Keywords*")
+        lines.append("<b>Trending Keywords</b>")
         for t in trends[:4]:
-            lines.append(f"📈 `{t['keyword']}` — {t['spike_factor']}× above average")
+            lines.append(f"📈 <code>{_esc(t['keyword'])}</code> — {t['spike_factor']}× above average")
 
-    msg = "\n".join(lines)
-    return msg[:MAX_MSG_LEN]
+    return _join_within_limit(lines)
 
 
-async def _send_async(text: str, bot_token: str, chat_id: str, parse_mode: str = "Markdown"):
+async def _send_async(text: str, bot_token: str, chat_id: str):
     from telegram import Bot
     from telegram.constants import ParseMode
     bot = Bot(token=bot_token)
-    pm = ParseMode.MARKDOWN_V2 if parse_mode == "MarkdownV2" else ParseMode.MARKDOWN
     await bot.send_message(
         chat_id=chat_id,
         text=text,
-        parse_mode=pm,
+        parse_mode=ParseMode.HTML,
         disable_web_page_preview=False,
     )
 
@@ -112,6 +140,8 @@ def _send(text: str):
 
 
 def send_digest(articles, clusters, insights, trends):
+    """Send the daily digest. Failures are logged and re-raised so main.py
+    records them in run_log instead of the digest vanishing silently."""
     cfg = config.settings()["telegram"]
     if not cfg.get("enabled", False):
         log.info("Telegram output disabled — skipping")
@@ -124,6 +154,7 @@ def send_digest(articles, clusters, insights, trends):
         log.info("Telegram digest sent")
     except Exception as e:
         log.error(f"Telegram digest failed: {e}")
+        raise
 
 
 def send_breaking_alert(article: dict):
@@ -135,8 +166,8 @@ def send_breaking_alert(article: dict):
         return
 
     try:
-        text = f"🚨 *BREAKING ALERT*\n\n{_format_article(article)}"
-        _send(text[:MAX_MSG_LEN])
-        log.info(f"Breaking alert sent: {article.get('title', '')[:60]}")
+        _send(f"🚨 <b>BREAKING ALERT</b>\n\n{_format_article(article)}")
+        log.info(f"Breaking alert sent: {(article.get('title') or '')[:60]}")
     except Exception as e:
         log.error(f"Telegram alert failed: {e}")
+        raise

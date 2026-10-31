@@ -8,6 +8,7 @@ Fix #10: send() is guarded by a run-level flag so it fires exactly once
 
 import smtplib
 import logging
+import time
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -120,7 +121,13 @@ def _send_smtp(html_body, subject):
     msg["To"]       = ", ".join(to_addrs)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    with smtplib.SMTP(smtp["host"], smtp["port"]) as server:
+    # smtplib defaults to the global socket timeout, which is normally None —
+    # a stalled DATA upload would then hang the run indefinitely. Generous,
+    # because a large digest is a slow upload, but bounded so a wedged
+    # socket raises and _send_with_retry can try again.
+    timeout = smtp.get("timeout", 120)
+
+    with smtplib.SMTP(smtp["host"], smtp["port"], timeout=timeout) as server:
         server.ehlo()
         server.starttls()
         server.login(smtp["username"], smtp["password"])
@@ -142,6 +149,58 @@ def _send_sendgrid(html_body, subject):
     )
     resp = sg.send(mail)
     log.info(f"SendGrid response: {resp.status_code}")
+
+
+# Gmail answers a slow or busy DATA phase with "421 4.3.0 Temporary System
+# Problem. Try again later." — a transient that a single-shot send treats as
+# fatal, losing a whole digest. Two retries, backing off, cover it.
+_RETRY_DELAYS = (30, 120)
+
+
+def _is_transient(exc) -> bool:
+    """True for SMTP failures worth retrying — 4xx and connection faults.
+
+    Never retries auth failures: a bad app password fails identically on every
+    attempt, so retrying only delays the error by 150s. Checked by type first
+    because Gmail reports throttled auth as 454 (a 4xx that is not transient).
+
+    The SMTPException arm has to come before the OSError arm: smtplib's
+    exceptions all subclass OSError, so a bare OSError check would classify
+    every permanent refusal (SMTPRecipientsRefused and friends, which carry
+    no smtp_code) as retryable.
+    """
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return False
+    code = getattr(exc, "smtp_code", None)
+    if isinstance(code, int):
+        return 400 <= code < 500
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return True
+    if isinstance(exc, smtplib.SMTPException):
+        return False
+    return isinstance(exc, OSError)   # raw socket faults: timeout, reset
+
+
+def _send_with_retry(sender, html_body, subject):
+    """Call `sender`, retrying transient failures with backoff.
+
+    A 421 at DATA means the message was never accepted (no 250 reply), so
+    resending is correct rather than a duplicate risk.
+    """
+    attempts = len(_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            sender(html_body, subject)
+            return
+        except Exception as e:
+            if attempt == attempts - 1 or not _is_transient(e):
+                raise
+            delay = _RETRY_DELAYS[attempt]
+            log.warning(
+                f"Email send failed ({e}) — transient, retrying in {delay}s "
+                f"(attempt {attempt + 2}/{attempts})"
+            )
+            time.sleep(delay)
 
 
 def send(articles, clusters, insights, trends):
@@ -174,10 +233,8 @@ def send(articles, clusters, insights, trends):
     try:
         html_body = _build_html(articles, clusters, insights, trends, today, cfg_display)
         provider  = cfg.get("provider", "smtp")
-        if provider == "sendgrid":
-            _send_sendgrid(html_body, subject)
-        else:
-            _send_smtp(html_body, subject)
+        sender    = _send_sendgrid if provider == "sendgrid" else _send_smtp
+        _send_with_retry(sender, html_body, subject)
         _sent_this_run = True
     except Exception as e:
         log.error(f"Email send failed: {e}")

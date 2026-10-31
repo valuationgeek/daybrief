@@ -101,18 +101,36 @@ def run_pipeline():
         )
 
         # ── Outputs ───────────────────────────────────
+        # Each output is isolated: one failing channel must not suppress the
+        # others or skip maintenance. Articles are already saved to the DB,
+        # so the next run dedupes them away — an output skipped here is lost
+        # for good. Failures are collected and re-raised together at the end,
+        # so the run still exits non-zero and run_log still records an error.
         log.info("Writing outputs…")
+        output_errors = []
 
-        obsidian.write(shown_articles, shown_clusters, insights, trends)
-        email_digest.send(shown_articles, shown_clusters, insights, trends)
-        telegram_bot.send_digest(shown_articles, shown_clusters, insights, trends)
+        def run_output(name, fn, *args):
+            try:
+                fn(*args)
+            except Exception as e:
+                log.exception(f"Output '{name}' failed: {e}")
+                output_errors.append(f"{name}: {e}")
+
+        run_output("obsidian", obsidian.write, shown_articles, shown_clusters, insights, trends)
+        run_output("email", email_digest.send, shown_articles, shown_clusters, insights, trends)
+        run_output("telegram", telegram_bot.send_digest, shown_articles, shown_clusters, insights, trends)
 
         for alert_article in alerts[:3]:
-            telegram_bot.send_breaking_alert(alert_article)
+            run_output("telegram_alert", telegram_bot.send_breaking_alert, alert_article)
 
         # ── Maintenance ───────────────────────────────
         settings = config.settings()
         db.purge_old_articles(days=settings["agent"].get("history_days", 90))
+
+        if output_errors:
+            raise RuntimeError(
+                f"{len(output_errors)} output(s) failed — {' | '.join(output_errors)}"
+            )
 
     except Exception as e:
         log.exception(f"Pipeline failed: {e}")
