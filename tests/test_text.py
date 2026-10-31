@@ -147,3 +147,14 @@ def test_extractive_summary_is_bounded_without_sentence_breaks():
 
 def test_extractive_summary_non_english_is_clipped():
     assert len(extractive_summary("中文新闻内容" * 100, english=False)) <= 301
+
+
+def test_curly_closing_quote_ends_a_sentence():
+    text = "The minister said “we will act soon.” The markets rallied on the news today."
+    assert first_sentences(text, count=1) == "The minister said “we will act soon.”"
+    assert drop_partial_tail("He said “it is over.” Then he left the") == "He said “it is over.”"
+
+
+def test_ascii_closing_quote_stays_with_its_sentence():
+    text = 'The minister said "we will act soon." The markets rallied on the news today.'
+    assert first_sentences(text, count=1) == 'The minister said "we will act soon."'
