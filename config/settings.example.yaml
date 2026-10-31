@@ -77,6 +77,13 @@ llm:
     warmup_timeout: 600
     # Keep the model in memory between stages so fusion doesn't cold-load it
     keep_alive: "30m"
+    # How many generate calls may run at once. Match the server's
+    # OLLAMA_NUM_PARALLEL (Ollama normally runs one at a time); extra
+    # requests wait here, so their wait doesn't count against `timeout`
+    max_concurrent: 1
+    # After this many failed calls in a row, stop calling Ollama for the
+    # rest of the run and use extractive summaries instead
+    failure_threshold: 3
   openai:
     # Leave base_url blank for api.openai.com, or point it at any other
     # OpenAI-compatible endpoint, e.g.:

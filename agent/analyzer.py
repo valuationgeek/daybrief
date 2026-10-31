@@ -259,7 +259,8 @@ def analyze_all(articles, max_workers=3):
     # Load the model once, serially, before the pool starts — otherwise every
     # worker races on the same cold load and they all hit the timeout together.
     if config.settings()["llm"].get("provider", "ollama") == "ollama":
-        from .ollama_client import warm_up
+        from .ollama_client import reset_breaker, warm_up
+        reset_breaker()
         warm_up()
 
     results = [None] * len(articles)

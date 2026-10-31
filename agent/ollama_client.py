@@ -13,6 +13,7 @@ Usage everywhere in this project:
 """
 
 import logging
+import threading
 
 import ollama
 from . import config
@@ -97,3 +98,65 @@ def warm_up() -> bool:
     except Exception as e:
         log.warning(f"Ollama warm-up failed ({e}) — first calls may time out")
         return False
+
+
+# ── Concurrency gate + circuit breaker ───────────────────────
+# Shared by every caller (analyzer workers and fusion) for the whole run.
+
+_slot_lock    = threading.Lock()
+_slots        = None
+_breaker_lock = threading.Lock()
+_breaker      = {"failures": 0, "open": False}
+
+
+def slot() -> threading.BoundedSemaphore:
+    """Gate to hold around client.generate() (llm.ollama.max_concurrent).
+
+    Ollama runs one request at a time unless OLLAMA_NUM_PARALLEL says
+    otherwise, and the per-call timeout includes time spent waiting in its
+    queue. With 4 analyzer workers and 400-token summaries, the last request
+    in a batch could wait three generations before it even started, and then
+    time out. Waiting here happens *before* the HTTP request, so the timeout
+    measures generation only. Set max_concurrent to match OLLAMA_NUM_PARALLEL.
+    """
+    global _slots
+    with _slot_lock:
+        if _slots is None:
+            n = max(1, int(config.settings()["llm"]["ollama"].get("max_concurrent", 1)))
+            _slots = threading.BoundedSemaphore(n)
+        return _slots
+
+
+def breaker_open() -> bool:
+    """True once Ollama has failed `failure_threshold` calls in a row.
+
+    Callers then return "" immediately and fall back to extractive output.
+    A wedged Ollama no longer costs a full timeout on every remaining article.
+    """
+    with _breaker_lock:
+        return _breaker["open"]
+
+
+def record_result(ok: bool) -> None:
+    """Feed the breaker the outcome of one generate call (after retries)."""
+    threshold = max(1, int(config.settings()["llm"]["ollama"].get("failure_threshold", 3)))
+    with _breaker_lock:
+        if ok:
+            _breaker["failures"] = 0
+            return
+        _breaker["failures"] += 1
+        if not _breaker["open"] and _breaker["failures"] >= threshold:
+            _breaker["open"] = True
+            log.warning(
+                f"Ollama failed {threshold} calls in a row — treating it as "
+                "unresponsive; extractive fallbacks for the rest of the run"
+            )
+
+
+def reset_breaker() -> None:
+    """Start a run with a closed breaker and a freshly sized gate."""
+    global _slots
+    with _breaker_lock:
+        _breaker.update(failures=0, open=False)
+    with _slot_lock:
+        _slots = None
