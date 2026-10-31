@@ -14,10 +14,25 @@ from datetime import datetime, timezone, timedelta
 import feedparser
 import httpx
 import trafilatura
+from trafilatura.settings import use_config
 
 from . import config, db
+from .net import with_retry, resolve_timeout
 
 log = logging.getLogger("daybrief.collector")
+
+_traf_cfg_cache = {}
+
+
+def _trafilatura_config(timeout):
+    """trafilatura.fetch_url takes its timeout from a config object, not a
+    keyword argument — without this it silently uses the 30s package default
+    and the caller's timeout is ignored."""
+    if timeout not in _traf_cfg_cache:
+        cfg = use_config()
+        cfg.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(int(timeout)))
+        _traf_cfg_cache[timeout] = cfg
+    return _traf_cfg_cache[timeout]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -50,9 +65,15 @@ def _rss_date(entry):
     return datetime.utcnow().isoformat()
 
 
-def _fetch_body(url, timeout=15):
+def _fetch_body(url, timeout=None):
+    """Fetch and extract an article's full text. Returns "" on failure —
+    an enrichment miss degrades the summary but must never abort the run."""
+    timeout = resolve_timeout(timeout)
     try:
-        html = trafilatura.fetch_url(url)
+        html = with_retry(
+            lambda: trafilatura.fetch_url(url, config=_trafilatura_config(timeout)),
+            what=f"body fetch {url}",
+        )
         if html:
             text = trafilatura.extract(html, include_comments=False, include_tables=False)
             return text or ""
@@ -99,6 +120,7 @@ def _fetch_all_rss():
     rss_cats     = cfg.get("rss_feeds", {})
     max_per_feed = limits.get("max_articles_per_feed", 10)
     max_age      = limits.get("max_age_hours", 24)
+    feed_timeout = resolve_timeout()
     articles     = []
 
     # Browser-like User-Agent — avoids blocks from sites like CGTN
@@ -118,9 +140,24 @@ def _fetch_all_rss():
             ignore_age  = feed.get("ignore_age", False)
 
             try:
+                # Fetch with httpx rather than letting feedparser download the
+                # URL itself: feedparser.parse(url) has no timeout parameter and
+                # falls back to urllib's default of "block forever", which can
+                # wedge the whole run if the network drops mid-fetch. Passing
+                # the Content-Type header along keeps feedparser's charset
+                # detection for feeds that declare their encoding only there.
+                resp = with_retry(
+                    lambda: httpx.get(
+                        url,
+                        headers={"User-Agent": ua},
+                        timeout=feed_timeout,
+                        follow_redirects=True,
+                    ).raise_for_status(),
+                    what=f"[RSS] {source}",
+                )
                 parsed = feedparser.parse(
-                    url,
-                    request_headers={"User-Agent": ua},
+                    resp.content,
+                    response_headers={"content-type": resp.headers.get("content-type", "")},
                 )
 
                 # feedparser returns bozo=True on parse errors but may still
@@ -176,7 +213,7 @@ def _fetch_nytimes():
     world_cat   = cfg.get("world_category", "world")
     emailed_cat = cfg.get("most_emailed_category", "breaking")
     max_results = cfg.get("max_results", 10)
-    timeout     = config.feeds().get("limits", {}).get("fetch_timeout_seconds", 15)
+    timeout     = resolve_timeout()
     articles    = []
 
     # Endpoint: Most Emailed → "Top Stories" category
@@ -184,8 +221,10 @@ def _fetch_nytimes():
     if endpoints.get("most_emailed", False):
         try:
             url  = f"https://api.nytimes.com/svc/mostpopular/v2/emailed/1.json?api-key={key}"
-            resp = httpx.get(url, timeout=timeout)
-            resp.raise_for_status()
+            resp = with_retry(
+                lambda: httpx.get(url, timeout=timeout).raise_for_status(),
+                what="[NYT] Most Emailed",
+            )
             count = 0
             for item in resp.json().get("results", [])[:max_results]:
                 link  = item.get("url", "")
@@ -207,8 +246,10 @@ def _fetch_nytimes():
     if endpoints.get("world", True):
         try:
             url  = f"https://api.nytimes.com/svc/topstories/v2/world.json?api-key={key}"
-            resp = httpx.get(url, timeout=timeout)
-            resp.raise_for_status()
+            resp = with_retry(
+                lambda: httpx.get(url, timeout=timeout).raise_for_status(),
+                what="[NYT] World Top Stories",
+            )
             count = 0
             for item in resp.json().get("results", [])[:max_results]:
                 link  = item.get("url", "")
@@ -249,7 +290,7 @@ def _fetch_newsdata():
     max_results = cfg.get("max_results", 10)
     # Category key these articles land in — override in feeds.yaml if needed.
     category    = cfg.get("category", "business")
-    timeout     = config.feeds().get("limits", {}).get("fetch_timeout_seconds", 15)
+    timeout     = resolve_timeout()
     articles    = []
 
     try:
@@ -261,8 +302,12 @@ def _fetch_newsdata():
             "prioritydomain": "top",         # top 10% of news domains
             "size":           max_results,
         }
-        resp = httpx.get("https://newsdata.io/api/1/market", params=params, timeout=timeout)
-        resp.raise_for_status()
+        resp = with_retry(
+            lambda: httpx.get(
+                "https://newsdata.io/api/1/market", params=params, timeout=timeout
+            ).raise_for_status(),
+            what="[NewsData] Market",
+        )
         data = resp.json()
 
         if data.get("status") != "success":
@@ -303,14 +348,43 @@ def collect_all():
 
     log.info(f"Total collected: {len(all_articles)} new articles")
 
-    # Enrich articles with short/missing body via full-page fetch
-    needs_body = [a for a in all_articles if len(a.get("body", "")) < 100]
+    # Enrich articles with short/missing body via full-page fetch.
+    # The default threshold is ~9000 chars (~1500 words), not 100: RSS
+    # <summary> tags are often just a lead paragraph, and when
+    # trafilatura.extract() can't clean one up, _fetch_all_rss falls back to
+    # raw_summary[:500] — a hard, mid-sentence truncation that a low threshold
+    # would miss (495 chars still looks "long enough"). Setting the bar this
+    # high means most RSS-only bodies get re-fetched from the source page,
+    # trading longer collection time for fuller, untruncated article text.
+    limits     = config.feeds().get("limits", {}) or {}
+    threshold  = limits.get("enrich_below_chars", 9000)
+    needs_body = [a for a in all_articles if len(a.get("body") or "") < threshold]
     if needs_body:
-        log.info(f"Fetching full text for {len(needs_body)} short-body articles...")
-        timeout = config.feeds().get("limits", {}).get("fetch_timeout_seconds", 15)
-        for a in needs_body:
+        log.info(f"Fetching full text for {len(needs_body)} articles with bodies under {threshold} chars...")
+        timeout = resolve_timeout()
+        # Circuit breaker: each _fetch_body can burn ~14s of backoff before
+        # giving up, so a sustained outage across this many articles would
+        # stall the run for the better part of an hour. A long run of
+        # consecutive failures means the network is down, not that these
+        # particular URLs are bad — stop enriching and finish on RSS bodies.
+        max_consecutive      = limits.get("enrich_failure_threshold", 8)
+        consecutive_failures = 0
+        for i, a in enumerate(needs_body):
             body = _fetch_body(a["url"], timeout)
-            if body:
+            # Only replace with something longer — a paywall stub or cookie
+            # banner must not overwrite a decent RSS body.
+            if body and len(body) > len(a.get("body") or ""):
                 a["body"] = body
+            if body:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive:
+                    log.warning(
+                        f"Body enrichment aborted after {max_consecutive} consecutive "
+                        f"failures ({i + 1}/{len(needs_body)} processed) — "
+                        "network likely down; continuing with RSS bodies"
+                    )
+                    break
 
     return all_articles

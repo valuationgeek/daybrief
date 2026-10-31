@@ -105,3 +105,14 @@ limits:
   max_articles_per_feed: 10
   max_age_hours: 12
   fetch_timeout_seconds: 20
+  # Transient network failures (timeouts, resets, DNS) are retried with
+  # exponential backoff: 2s, 4s, 8s … HTTP errors like 404/401 are not retried.
+  retry_attempts: 4
+  retry_base_delay: 2
+  # Articles whose body is shorter than this get their full page fetched.
+  # High by default because RSS bodies are often a truncated lead paragraph;
+  # lower it (e.g. 1500) for faster runs at the cost of thinner summaries.
+  enrich_below_chars: 9000
+  # Stop full-page fetching after this many consecutive failures (the network
+  # is probably down) and finish the run on the RSS bodies alone.
+  enrich_failure_threshold: 8
