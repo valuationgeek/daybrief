@@ -23,7 +23,10 @@ from keybert import KeyBERT
 
 from . import config
 from .llm import generate
-from .text import first_sentences, fix_stale_descriptors, strip_meta
+from .text import (
+    clip, extractive_summary, fix_stale_descriptors, log_ungrounded_numbers,
+    strip_meta, strip_ungrounded_dates,
+)
 
 log = logging.getLogger("daybrief.analyzer")
 
@@ -46,10 +49,7 @@ _SUMMARY_PROMPT = """\
 You are a professional news editor. Summarize the article below using ONLY \
 information explicitly stated in the article.
 
-This article was published on {date}. It describes the state of the world as \
-of that date, which may be more recent than your training data.
-
-Rules:
+{date_line}Rules:
 - Maximum 150 words
 - ONLY use facts, names, numbers, and quotes that appear verbatim in the article
 - Do NOT invent, infer, or add any figures, names, ticker symbols, or details \
@@ -65,8 +65,18 @@ write "President X"
 - Do NOT include a word count, character count, or any meta-commentary about the summary itself
 - Keep the sign of every figure exactly as the article states it (e.g. a \
 "-3%" move stays negative) — do NOT flip, add, or remove "+"/"-" signs
+- Only state a calendar date if the article itself states it. Keep relative \
+time words exactly as written ("on Friday", "last week") — do NOT convert \
+them into calendar dates, and do NOT open the summary with a date or month
+- Keep who did what exactly as the article says — do NOT change which person \
+or company a figure, forecast, or action belongs to (e.g. "its profit \
+forecast was below analysts' expectations" must NOT become "missed profit \
+forecasts")
 - Do NOT append a sentiment label, rating, or verdict of any kind — output \
 only the summary prose
+- If the article text appears cut off or incomplete, summarize only what is \
+present and say nothing about it — do NOT add a note, caveat, or comment \
+mentioning that the text is truncated, incomplete, or cut off
 
 Title: {title}
 
@@ -98,12 +108,31 @@ Read angle:"""
 # ─────────────────────────────────────────────────────────────
 
 def _pub_date_str(published):
-    """Human-readable publication date for the prompt; today if unknown."""
+    """Publication month for the prompt ("October 2026"); "" if unknown.
+
+    Month + year only, on purpose. The line exists so the model doesn't
+    "correct" recent facts from stale training data, and the month does that
+    job. A full day was copied into summaries as the event date ("On October
+    31, 2026, …" for a story about Friday's Oct 30 close — the UTC publish
+    timestamp had already rolled over). Unknown dates give no line at all,
+    rather than presenting today's date as fact.
+    """
     try:
         dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError):
-        dt = datetime.now()
-    return dt.strftime("%B %d, %Y")
+        return ""
+    return dt.strftime("%B %Y")
+
+
+def _date_line(published):
+    month = _pub_date_str(published)
+    if not month:
+        return ""
+    return (
+        f"This article was published in {month}. It describes the state of "
+        "the world as of then, which may be more recent than your training "
+        "data.\n\n"
+    )
 
 
 def _summarize_and_angle(title, body, published=""):
@@ -125,15 +154,18 @@ def _summarize_and_angle(title, body, published=""):
     # anything that still overruns back to the last full sentence.
     summary = generate(
         _SUMMARY_PROMPT.format(
-            title=title, body=body[:12000], date=_pub_date_str(published)
+            title=title, body=body[:12000], date_line=_date_line(published)
         ),
         max_tokens=400,
     )
     if not summary:
         log.warning(f"No LLM summary — extractive fallback for: {title[:60]}")
-        summary = first_sentences(body) or title
+        summary = extractive_summary(body) or title
+    source  = f"{title}. {body}"
     summary = strip_meta(summary)
     summary = fix_stale_descriptors(summary, body)
+    summary = strip_ungrounded_dates(summary, source)
+    log_ungrounded_numbers(summary, source, title)
 
     # Step 2: read angle (uses summary as input — no re-sending full article)
     # Same tokens-vs-words trap: a ≤50-word sentence does not fit in 50 tokens.
@@ -193,7 +225,7 @@ def analyze_article(article):
     if language != "en":
         # Non-English articles: skip LLM, keep original text as-is
         # Summary = title (no translation), read_angle = blank
-        article["summary"]     = body[:300] if body else title
+        article["summary"]     = clip(body) if body else title
         article["read_angle"]  = ""
         article["impact"]      = ""   # keep for DB compatibility
     else:
@@ -210,8 +242,9 @@ def analyze_article(article):
 def _fallback_analysis(article):
     """Fill the analyzer fields with safe defaults when analysis raised, so
     downstream stages and outputs never see the collector's None summary."""
-    body = article.get("body") or ""
-    article["summary"]         = first_sentences(body) or body[:300] or article.get("title", "")
+    body    = article.get("body") or ""
+    english = article.get("language", "en") == "en"
+    article["summary"]         = extractive_summary(body, english) or article.get("title", "")
     article["read_angle"]      = ""
     article["impact"]          = ""
     article["keywords"]        = article.get("keywords") or []
