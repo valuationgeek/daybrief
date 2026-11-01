@@ -82,8 +82,8 @@ def test_typography_and_currency_signs_are_kept():
 
 
 def test_invisible_characters_are_removed():
-    body = ("The​ Federal﻿ Reserve\x07 raised rates  by 25 basis points "
+    body = ("The\u200b Federal\ufeff Reserve\x07 raised rates\u00a0\u00a0by 25 basis points "
             "on Wednesday as it battles inflation toward its target.")
     cleaned = process([_article(body=body)])[0]["body"]
     assert cleaned.startswith("The Federal Reserve raised rates by 25 basis points")
-    assert not any(ch in cleaned for ch in "​﻿\x07 ")
+    assert not any(ch in cleaned for ch in "\u200b\ufeff\x07\u00a0")
