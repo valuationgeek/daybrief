@@ -27,16 +27,28 @@ _BOILERPLATE_RE = re.compile(
     "|".join(_BOILERPLATE), re.IGNORECASE | re.MULTILINE
 )
 
+# Characters that are never visible text: C0/C1 control codes (except the
+# whitespace ones, which the whitespace collapse handles), zero-width and
+# bidi-control marks, and the BOM. Everything else is real text and stays:
+# accents, curly quotes, dashes, €/£/¥, CJK.
+_INVISIBLE_RE = re.compile(
+    "[\x00-\x08\x0e-\x1f\x7f-\x9f"
+    "\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
+)
+
 
 def _clean_text(text: str) -> str:
     if not text:
         return ""
     # Remove boilerplate
     text = _BOILERPLATE_RE.sub("", text)
+    # Remove invisible characters. This used to be [^\x20-\x7E\n], which
+    # deleted every non-ASCII character: Chinese bodies came out empty and
+    # were dropped as "too short", and English text lost its curly quotes,
+    # accents, em dashes and currency signs ("£50m" became "50m").
+    text = _INVISIBLE_RE.sub("", text)
     # Collapse whitespace
     text = re.sub(r"\s{2,}", " ", text)
-    # Remove non-printable chars
-    text = re.sub(r"[^\x20-\x7E\n]", "", text)
     return text.strip()
 
 

@@ -65,3 +65,25 @@ def test_normalises_bad_published_date():
     assert len(result) == 1
     # Must be replaced with a parseable ISO timestamp
     datetime.fromisoformat(result[0]["published"])
+
+
+def test_chinese_body_survives_cleaning():
+    body = "香港特區政府今日公布新一輪防疫措施，" * 6   # >80 chars, no ASCII at all
+    result = process([_article(title="港府公布新措施", body=body)])
+    assert len(result) == 1
+    assert result[0]["body"] == body
+
+
+def test_typography_and_currency_signs_are_kept():
+    body = ("The bank’s chief said “rates will rise” — café owners in Zürich expect "
+            "£50m and €12bn in new costs, while ¥ deposits fell.")
+    result = process([_article(body=body)])
+    assert result[0]["body"] == body
+
+
+def test_invisible_characters_are_removed():
+    body = ("The\u200b Federal\ufeff Reserve\x07 raised rates\u00a0\u00a0by 25 basis points "
+            "on Wednesday as it battles inflation toward its target.")
+    cleaned = process([_article(body=body)])[0]["body"]
+    assert cleaned.startswith("The Federal Reserve raised rates by 25 basis points")
+    assert not any(ch in cleaned for ch in "\u200b\ufeff\x07\u00a0")

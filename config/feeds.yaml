@@ -35,7 +35,7 @@ rss_feeds:
       - url: "https://rthk9.rthk.hk/rthk/news/rss/e_expressnews_efinance.xml"
         source: "RTHK Finance"
         credibility: 0.90
-        language: "en"          # Chinese — kept as-is, no translation
+        language: "en"          # e_… feeds are RTHK's English editions
 
   # 3rd — World Headlines
   world:
@@ -105,3 +105,17 @@ limits:
   max_articles_per_feed: 10
   max_age_hours: 12
   fetch_timeout_seconds: 20
+  # Transient network failures (timeouts, resets, DNS) are retried with
+  # exponential backoff: 2s, 4s, 8s … HTTP errors like 404/401 are not retried.
+  retry_attempts: 4
+  retry_base_delay: 2
+  # Articles whose body is shorter than this get their full page fetched.
+  # High by default because RSS bodies are often a truncated lead paragraph;
+  # lower it (e.g. 1500) for faster runs at the cost of thinner summaries.
+  enrich_below_chars: 9000
+  # Full-page fetches run in parallel; non-English articles are never re-fetched.
+  enrich_workers: 4
+  # Stop full-page fetching after this many unreachable hosts in a row (the
+  # network is probably down) and finish the run on the RSS bodies alone.
+  # Paywalls and bot blocks don't count — only requests that got no response.
+  enrich_failure_threshold: 8

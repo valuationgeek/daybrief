@@ -32,6 +32,8 @@ email:
   smtp:
     host: "smtp.gmail.com"
     port: 587
+    # Seconds before a stalled connection or upload is abandoned (and retried)
+    timeout: 120
     username: "you@example.com"
     # For Gmail use an App Password, not your real password:
     # https://myaccount.google.com/apppasswords
@@ -40,6 +42,8 @@ email:
   sendgrid:
     # Secret — set SENDGRID_API_KEY in .env (see .env.example)
     api_key: "${SENDGRID_API_KEY:-}"
+    # Seconds before a stalled API request is abandoned
+    timeout: 60
   from_address: "you@example.com"
   to_addresses:
     - "you@example.com"
@@ -66,7 +70,20 @@ llm:
     # Change base_url if Ollama runs on another machine or in a container
     base_url: "http://localhost:11434"
     model: "llama3.2"                # or mistral, phi3:mini, gemma2:2b …
-    timeout: 60
+    # Seconds a single generate call may take before it is abandoned
+    # (the article then falls back to an extractive summary)
+    timeout: 180
+    # The one-off model load before analysis can legitimately take minutes
+    warmup_timeout: 600
+    # Keep the model in memory between stages so fusion doesn't cold-load it
+    keep_alive: "30m"
+    # How many generate calls may run at once. Match the server's
+    # OLLAMA_NUM_PARALLEL (Ollama normally runs one at a time); extra
+    # requests wait here, so their wait doesn't count against `timeout`
+    max_concurrent: 1
+    # After this many failed calls in a row, stop calling Ollama for the
+    # rest of the run and use extractive summaries instead
+    failure_threshold: 3
   openai:
     # Leave base_url blank for api.openai.com, or point it at any other
     # OpenAI-compatible endpoint, e.g.:
@@ -77,6 +94,8 @@ llm:
     model: "gpt-4.1-mini"            # any model name your endpoint serves
     # Secret — set OPENAI_API_KEY in .env (see .env.example)
     api_key: "${OPENAI_API_KEY:-}"
+    # Seconds per request before it is abandoned (SDK default is 10 minutes)
+    timeout: 120
 
 # General agent settings
 agent:

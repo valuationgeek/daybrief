@@ -15,8 +15,8 @@ from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from .analyzer import _strip_meta
 from .llm import generate
+from .text import fix_stale_descriptors, strip_meta, strip_ungrounded_dates
 
 log = logging.getLogger("daybrief.fusion")
 
@@ -75,6 +75,12 @@ def _fuse_cluster(cluster_articles):
         f"Source: {a['source']}\n{a.get('summary') or a.get('body', '')[:500]}"
         for a in cluster_articles
     ])
+    # Grounding text for the backstops: the prompt sees mostly per-article
+    # summaries, which have already had ungrounded dates stripped — so a date
+    # the articles genuinely state may be missing from `combined` alone.
+    source_text = combined + "\n\n" + "\n\n".join(
+        f"{a.get('title', '')}. {a.get('body') or ''}" for a in cluster_articles
+    )
 
     prompt = (
         f"Multiple news sources ({sources}) are covering the same event.\n"
@@ -85,15 +91,19 @@ def _fuse_cluster(cluster_articles):
         "4. States the significance — do NOT invent figures or names not in the sources\n"
         "5. Refers to people and their titles or roles exactly as the sources do — "
         "do NOT add background knowledge (e.g. \"former\", \"current\", job titles, "
-        "historical context) that is not stated in the sources\n\n"
+        "historical context) that is not stated in the sources\n"
+        "6. Only states a calendar date if the sources state it — keep relative "
+        "time words (\"on Friday\") as written\n\n"
         f"Articles:\n{combined[:3000]}\n\nUnified summary:"
     )
 
     unified = generate(prompt, max_tokens=300)
     if unified:
-        return _strip_meta(unified)
+        unified = strip_meta(unified)
+        unified = fix_stale_descriptors(unified, source_text)
+        return strip_ungrounded_dates(unified, source_text)
 
-    # LLM unavailable — fall back to joining the individual summaries
+    log.warning("Fusion LLM returned nothing — joining member summaries")
     parts = [a.get("summary", "") for a in cluster_articles if a.get("summary")]
     return " | ".join(parts[:3])
 
