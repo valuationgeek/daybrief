@@ -73,6 +73,16 @@ def _is_html(content_type):
     return not content_type or "html" in content_type.lower()
 
 
+_CHARSET_RE = re.compile(r"charset\s*=\s*[\"']?([A-Za-z0-9._:-]+)", re.IGNORECASE)
+
+
+def _feed_content_type(server_type):
+    """What feedparser is told the feed's Content-Type is: application/xml,
+    plus the server's charset when it states one (see _fetch_all_rss)."""
+    m = _CHARSET_RE.search(server_type or "")
+    return f"application/xml; charset={m.group(1)}" if m else "application/xml"
+
+
 def _is_recent(date_str, max_age_hours):
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
@@ -164,7 +174,9 @@ def _usable_body(new, old, title):
     """
     if not new or len(new) <= len(old or ""):
         return False
-    if _BLOCK_PAGE_RE.search(new[:600]):
+    # Interstitials are short. A long page, or a story whose own headline is
+    # about cookies or privacy settings, may open with those words for real.
+    if len(new) < 3000 and not _BLOCK_PAGE_RE.search(title or "") and _BLOCK_PAGE_RE.search(new[:600]):
         return False
     words = {w.lower() for w in _TITLE_WORD_RE.findall(title or "")}
     if len(words) >= 2:
@@ -359,17 +371,19 @@ def _fetch_all_rss():
                     what=f"[RSS] {source}",
                 )
                 # content-location lets feedparser resolve relative entry links.
-                # The server's Content-Type is deliberately NOT forwarded: per
-                # RFC 3023 its charset overrides the XML declaration, and servers
-                # like RTHK send bare "text/xml" (= us-ascii) for UTF-8 feeds,
-                # which marks them bozo. A fixed charset-less application/xml
-                # defers to the XML's own encoding declaration; omitting the
-                # header entirely would mark every feed bozo ("no Content-type").
+                # Per RFC 3023 a Content-Type charset overrides the XML
+                # declaration, and a bare "text/xml" means us-ascii. Servers like
+                # RTHK send bare "text/xml" for UTF-8 feeds, which marks them
+                # bozo, so a type without a charset becomes a charset-less
+                # application/xml that defers to the XML's own declaration.
+                # A charset the server does state is kept: a GBK or Big5 feed
+                # whose XML declaration names no encoding depends on it.
+                # Omitting the header entirely would mark every feed bozo.
                 parsed = feedparser.parse(
                     resp.content,
                     response_headers={
                         "content-location": str(resp.url),
-                        "content-type":     "application/xml",
+                        "content-type":     _feed_content_type(resp.headers.get("content-type", "")),
                     },
                 )
 

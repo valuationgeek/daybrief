@@ -226,3 +226,29 @@ def test_strip_html_unescapes_before_stripping_and_keeps_comparisons():
     text = collector._strip_html(raw)
     assert "<iframe" not in text and "<p>" not in text
     assert "Profit < 5% while revenue > 10%" in text
+
+
+def test_real_story_about_cookies_is_not_taken_for_a_cookie_wall():
+    page = ("Google said users will be able to manage cookies in Chrome's privacy settings, "
+            "as it drops its plan to phase out third-party cookies. ") * 40
+    assert collector._usable_body(page, "short lead", "Google drops plan to phase out third-party cookies")
+
+
+@pytest.mark.parametrize("server, told", [
+    ("text/xml", "application/xml"),                                   # RTHK: no charset, defer to the XML
+    ("text/xml; charset=GBK", "application/xml; charset=GBK"),          # a stated charset is kept
+    ('application/rss+xml; charset="big5"', "application/xml; charset=big5"),
+    ("", "application/xml"),
+])
+def test_feed_content_type_keeps_only_a_stated_charset(server, told):
+    assert collector._feed_content_type(server) == told
+
+
+def test_gbk_feed_without_an_xml_encoding_decodes_with_the_server_charset():
+    import feedparser
+
+    xml = ('<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+           '<item><title>央行降息</title><link>https://example.cn/a</link></item></channel></rss>')
+    parsed = feedparser.parse(xml.encode("gbk"), response_headers={
+        "content-type": collector._feed_content_type("text/xml; charset=GBK")})
+    assert parsed.entries[0].title == "央行降息"
