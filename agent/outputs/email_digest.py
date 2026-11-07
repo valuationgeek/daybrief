@@ -8,6 +8,7 @@ Fix #10: send() is guarded by a run-level flag so it fires exactly once
 
 import smtplib
 import logging
+import ssl
 import time
 import urllib.error
 from datetime import datetime
@@ -153,7 +154,9 @@ def _send_smtp(html_body, subject):
     server = smtplib.SMTP(smtp["host"], smtp["port"], timeout=timeout)
     try:
         server.ehlo()
-        server.starttls()
+        # Without a context, smtplib accepts any certificate, so anyone on the
+        # network path could pose as the server and collect the app password.
+        server.starttls(context=ssl.create_default_context())
         server.login(smtp["username"], smtp["password"])
         try:
             server.sendmail(from_addr, to_addrs, msg.as_string())

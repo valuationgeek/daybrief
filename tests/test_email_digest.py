@@ -92,8 +92,8 @@ class FakeSMTP:
     def ehlo(self):
         pass
 
-    def starttls(self):
-        pass
+    def starttls(self, context=None):
+        self.tls_context = context
 
     def login(self, user, password):
         if self.step and self.step[0] == "login":
@@ -144,6 +144,14 @@ def test_explicit_421_at_data_is_retried(fake_smtp, sleeps):
     fake_smtp.script = [("sendmail", smtplib.SMTPDataError(421, b"Temporary System Problem")), None]
     _send_with_retry(email_digest._send_smtp, "<html/>", "subject")
     assert [c.sent for c in fake_smtp.connections] == [False, True]
+
+
+def test_starttls_verifies_the_server_certificate(fake_smtp, sleeps):
+    import ssl
+
+    email_digest._send_smtp("<html/>", "subject")
+    ctx = fake_smtp.connections[0].tls_context
+    assert ctx is not None and ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
 
 
 def test_quit_timeout_after_delivery_is_ignored(fake_smtp, sleeps):

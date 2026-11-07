@@ -8,6 +8,7 @@ Three sections:
 """
 
 import hashlib
+import html
 import logging
 import re
 import threading
@@ -20,7 +21,10 @@ import httpx
 import trafilatura
 
 from . import config, db
-from .net import TRANSIENT_ERRORS, with_retry, resolve_timeout
+from .net import (
+    MAX_FEED_BYTES, MAX_PAGE_BYTES, TRANSIENT_ERRORS, FetchRefused,
+    resolve_timeout, safe_get, with_retry,
+)
 
 log = logging.getLogger("daybrief.collector")
 
@@ -54,6 +58,21 @@ def _make_id(url):
     return hashlib.sha256(url.encode()).hexdigest()[:16]
 
 
+def _strip_html(text):
+    """Plain text from an RSS summary trafilatura couldn't extract anything from.
+
+    Unescapes first, then strips tags: the other order turns an escaped
+    "&lt;iframe src=…&gt;" back into a live tag after the strip has run. A tag
+    must start with a letter, "/" or "!" right after "<", so a literal
+    comparison ("Profit < 5% while revenue > 10%") isn't mistaken for one.
+    """
+    return re.sub(r"<[A-Za-z/!][^>]*>", " ", html.unescape(text or "")).strip()
+
+
+def _is_html(content_type):
+    return not content_type or "html" in content_type.lower()
+
+
 def _is_recent(date_str, max_age_hours):
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
@@ -76,7 +95,7 @@ def _rss_date(entry):
     return datetime.utcnow().isoformat()
 
 
-def _fetch_body(url, timeout=None):
+def _fetch_body(url, timeout=None, client=None):
     """Fetch and extract an article's full text.
 
     Returns (text, network_ok). `text` is "" on any miss. `network_ok` is
@@ -86,24 +105,30 @@ def _fetch_body(url, timeout=None):
     network_ok stays True. One paywalled source must not switch enrichment
     off for every other site.
 
-    Downloaded with httpx rather than trafilatura.fetch_url. fetch_url
+    Downloaded with net.safe_get rather than trafilatura.fetch_url. fetch_url
     catches every exception and returns None, so a with_retry around it
-    never fired, and an outage looked exactly like a paywall.
+    never fired, and an outage looked exactly like a paywall. safe_get also
+    refuses links (and redirects) to private or local addresses, and caps
+    the size, because the feed, not us, chooses this URL. A non-HTML page
+    is dropped once its headers arrive, before its body downloads.
     """
     timeout = resolve_timeout(timeout)
     if not url or not url.lower().startswith(("http://", "https://")):
         return "", True
     try:
         resp = with_retry(
-            lambda: httpx.get(
+            lambda: safe_get(
                 url,
                 headers={"User-Agent": _BROWSER_UA},
                 timeout=timeout,
-                follow_redirects=True,
+                max_bytes=MAX_PAGE_BYTES,
+                accept=_is_html,
+                client=client,
             ),
             what=f"body fetch {url}",
         )
-    except httpx.UnsupportedProtocol:
+    except (httpx.UnsupportedProtocol, httpx.InvalidURL, FetchRefused) as e:
+        log.debug(f"Body fetch refused for {url}: {e}")
         return "", True
     except TRANSIENT_ERRORS as e:
         log.debug(f"Body fetch failed for {url}: {e}")
@@ -113,7 +138,7 @@ def _fetch_body(url, timeout=None):
         return "", True
 
     ctype = resp.headers.get("content-type", "").lower()
-    if resp.status_code >= 400 or (ctype and "html" not in ctype):
+    if resp.status_code >= 400 or not _is_html(ctype):
         log.debug(f"Body fetch {url}: HTTP {resp.status_code} {ctype or '?'} — page-level miss")
         return "", True
     try:
@@ -194,11 +219,21 @@ def _enrich_bodies(articles):
     state      = {"streak": 0, "stopped": False}
 
     def work(url):
-        host = urlparse(url).netloc.lower()
+        try:
+            host = urlparse(url).netloc.lower()
+        except ValueError:
+            # "http://[2001:db8::1/story": one bad link is a page-level miss,
+            # never an exception out of fut.result() that aborts Stage 1.
+            log.debug(f"Skipping malformed URL: {url}")
+            return url, ("", True)
         with lock:
             if state["stopped"] or host in down_hosts:
                 return url, None   # skipped — breaker open or host unreachable
-        text, network_ok = _fetch_body(url, timeout)
+        try:
+            text, network_ok = _fetch_body(url, timeout, client)
+        except Exception as e:   # _fetch_body handles its own errors; this is a backstop
+            log.debug(f"Body fetch crashed for {url}: {e}")
+            text, network_ok = "", True
         # Breaker state is updated here in the worker, not in the result loop
         # below: by the time a result is consumed, the worker may already be
         # running the next queued URLs, which must see the updated state.
@@ -217,7 +252,9 @@ def _enrich_bodies(articles):
         return url, (text, network_ok)
 
     replaced = rejected = misses = 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    # One client for the pool: keep-alive connections are reused across
+    # articles from the same site instead of a new TLS handshake per page.
+    with httpx.Client(follow_redirects=False) as client, ThreadPoolExecutor(max_workers=workers) as pool:
         for fut in as_completed([pool.submit(work, url) for url in by_url]):
             url, result = fut.result()
             if result is None or not result[1]:
@@ -298,11 +335,11 @@ def _fetch_all_rss():
                 # falls back to urllib's default of "block forever", which can
                 # wedge the whole run if the network drops mid-fetch.
                 resp = with_retry(
-                    lambda: httpx.get(
+                    lambda: safe_get(
                         url,
                         headers={"User-Agent": ua},
                         timeout=feed_timeout,
-                        follow_redirects=True,
+                        max_bytes=MAX_FEED_BYTES,
                     ).raise_for_status(),
                     what=f"[RSS] {source}",
                 )
@@ -339,7 +376,7 @@ def _fetch_all_rss():
                     if db.article_exists(link):
                         continue
                     raw_summary = getattr(entry, "summary", "") or ""
-                    body    = trafilatura.extract(raw_summary) or raw_summary[:500]
+                    body    = trafilatura.extract(raw_summary) or _strip_html(raw_summary)[:500]
                     article = _blank_article(title, link, source, cat_key, pub, body, credibility)
                     article["language"] = language
                     articles.append(article)

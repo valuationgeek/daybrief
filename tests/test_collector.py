@@ -1,4 +1,6 @@
-"""Offline tests for body enrichment in agent/collector.py — httpx is mocked."""
+"""Offline tests for body enrichment in agent/collector.py — the network and DNS are mocked."""
+
+import socket
 
 import httpx
 import pytest
@@ -26,14 +28,34 @@ def offline(monkeypatch):
     return limits
 
 
-def _mock_get(monkeypatch, handler):
+def _dns(monkeypatch, address="93.184.216.34", only=None):
+    """Host names resolve to `address` (public by default). With `only`, just that host does."""
+    real = net.socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if only is not None and host != only:
+            return real(host, port, *args, **kwargs)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(net.socket, "getaddrinfo", getaddrinfo)
+
+
+def _mock_get(monkeypatch, handler, address="93.184.216.34"):
+    """Serve every request from `handler` through every httpx.Client safe_get makes."""
     calls = []
 
-    def get(url, **kwargs):
-        calls.append(url)
-        return handler(httpx.Request("GET", url))
+    def record(request):
+        calls.append(str(request.url))
+        return handler(request)
 
-    monkeypatch.setattr(collector.httpx, "get", get)
+    real_client = httpx.Client
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(record)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", client)
+    _dns(monkeypatch, address)
     return calls
 
 
@@ -64,6 +86,33 @@ def test_transport_error_is_retried_then_reported_as_network_failure(monkeypatch
     calls = _mock_get(monkeypatch, fail)
     assert collector._fetch_body("https://example.com/a") == ("", False)
     assert len(calls) == 2   # retry_attempts: 2 — the retry actually happens now
+
+
+def test_link_to_a_private_address_is_refused_without_a_request(monkeypatch):
+    calls = _mock_get(monkeypatch, lambda req: httpx.Response(200, text=ARTICLE_HTML, request=req),
+                      address="192.168.1.1")
+    assert collector._fetch_body("http://router.example/admin") == ("", True)
+    assert calls == []
+
+
+def test_redirect_to_a_private_address_is_refused(monkeypatch):
+    def handler(req):
+        if req.url.host == "news.example":
+            return httpx.Response(302, headers={"location": "http://ollama.internal:11434/api/ps"}, request=req)
+        return httpx.Response(200, text="secret", request=req)
+
+    calls = _mock_get(monkeypatch, handler)
+    _dns(monkeypatch, "93.184.216.34")
+    public = net.socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host == "ollama.internal":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        return public(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(net.socket, "getaddrinfo", getaddrinfo)
+    assert collector._fetch_body("https://news.example/story") == ("", True)
+    assert calls == ["https://news.example/story"]
 
 
 def test_relative_url_is_never_fetched(monkeypatch):
@@ -103,7 +152,7 @@ def _articles(urls, **extra):
 def _fake_fetch(monkeypatch, result_for):
     calls = []
 
-    def fetch(url, timeout=None):
+    def fetch(url, timeout=None, client=None):
         calls.append(url)
         return result_for(url)
 
@@ -144,3 +193,21 @@ def test_non_english_and_long_bodies_are_not_refetched(monkeypatch):
     articles += [{"url": "https://example.com/long", "title": "t", "body": "x" * 9500}]
     collector._enrich_bodies(articles)
     assert calls == []
+
+
+def test_malformed_link_does_not_abort_enrichment(monkeypatch):
+    page = "Binance said it is attempting to recover the stolen funds after the hack. " * 20
+    calls = _fake_fetch(monkeypatch, lambda url: (page, True))
+    articles = _articles(["http://[2001:db8::1/story", "https://example.com/ok"])
+    collector._enrich_bodies(articles)
+    assert calls == ["https://example.com/ok"]
+    assert articles[1]["body"] == page
+
+
+# ── RSS summaries ────────────────────────────────────────────
+
+def test_strip_html_unescapes_before_stripping_and_keeps_comparisons():
+    raw = "&lt;iframe src='https://evil.example'&gt;&lt;/iframe&gt; <p>Profit < 5% while revenue > 10%</p>"
+    text = collector._strip_html(raw)
+    assert "<iframe" not in text and "<p>" not in text
+    assert "Profit < 5% while revenue > 10%" in text
