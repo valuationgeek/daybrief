@@ -118,21 +118,26 @@ def fuse_all(articles):
       - updated articles list (cluster_id set on each article)
       - list of cluster dicts (only clusters with 2+ articles)
     """
-    if len(articles) < 2:
+    # English only. all-MiniLM-L6-v2 can't represent most other languages
+    # (much of the text comes out as unknown tokens), so it merges unrelated
+    # stories, and fusing them would send that text to the LLM, which answers
+    # in English. Non-English articles stay solo with cluster_id None.
+    clusterable = [a for a in articles if a.get("language", "en") == "en"]
+    if len(clusterable) < 2:
         return articles, []
 
-    log.info(f"Clustering {len(articles)} articles across all categories...")
-    embeddings   = _embed_articles(articles)
+    log.info(f"Clustering {len(clusterable)} articles across all categories...")
+    embeddings   = _embed_articles(clusterable)
     raw_clusters = _cluster_articles(embeddings)
     cluster_dicts = []
     today = datetime.utcnow().date().isoformat()
 
     for raw_cluster in raw_clusters:
         cid              = str(uuid.uuid4())[:8]
-        cluster_articles = [articles[i] for i in raw_cluster]
+        cluster_articles = [clusterable[i] for i in raw_cluster]
 
         for i in raw_cluster:
-            articles[i]["cluster_id"] = cid
+            clusterable[i]["cluster_id"] = cid
 
         if len(cluster_articles) < 2:
             continue  # solo article — no fusion needed

@@ -85,6 +85,7 @@ def _is_recent(date_str, max_age_hours):
 
 
 def _rss_date(entry):
+    """The entry's publication time in ISO format, or None if it has none."""
     for attr in ("published_parsed", "updated_parsed", "created_parsed"):
         t = getattr(entry, attr, None)
         if t:
@@ -92,7 +93,7 @@ def _rss_date(entry):
                 return datetime(*t[:6], tzinfo=timezone.utc).isoformat()
             except Exception:
                 pass
-    return datetime.utcnow().isoformat()
+    return None
 
 
 def _fetch_body(url, timeout=None, client=None):
@@ -184,8 +185,9 @@ def _enrich_bodies(articles):
     high means most RSS-only bodies get re-fetched, so the fetches have to be
     cheap:
 
-    - non-English articles are skipped (their summary only ever uses ~300
-      chars of body, and they bypass the LLM);
+    - non-English articles are fetched only when their body is nearly empty
+      (limits.enrich_non_english_below_chars): their summary only ever uses
+      ~300 chars of body, and they bypass the LLM;
     - each URL is fetched once, even if several feeds carry it;
     - fetches run in a small thread pool (limits.enrich_workers);
     - once a host fails at the network level, its remaining URLs are
@@ -198,9 +200,14 @@ def _enrich_bodies(articles):
     """
     limits    = config.feeds().get("limits", {}) or {}
     threshold = limits.get("enrich_below_chars", 9000)
+    # Non-English summaries only use ~300 chars of body and skip the LLM, so
+    # a long page buys nothing. A title-only entry (empty <description>) is
+    # still rescued, or the preprocessor drops it as too short.
+    other_threshold = limits.get("enrich_non_english_below_chars", 300)
     by_url    = {}
     for a in articles:
-        if a.get("language", "en") != "en" or len(a.get("body") or "") >= threshold:
+        limit = threshold if a.get("language", "en") == "en" else other_threshold
+        if len(a.get("body") or "") >= limit:
             continue
         by_url.setdefault(a["url"], []).append(a)
     if not by_url:
@@ -279,14 +286,22 @@ def _enrich_bodies(articles):
 
 
 def _blank_article(title, url, source, category, published, body="", credibility=0.80):
-    """Standard article dict. All downstream stages expect exactly this shape."""
+    """Standard article dict. All downstream stages expect exactly this shape.
+
+    A missing `published` is filled with the fetch time so sorting and
+    recency still work, and `published_estimated` says so: the analyzer must
+    never tell the LLM that the fetch time is when the article came out.
+    """
+    estimated = not published
     return {
         "id":              _make_id(url),
         "title":           title.strip(),
         "url":             url,
         "source":          source,
         "category":        category,
-        "published":       published,
+        "published":       published or datetime.utcnow().isoformat(),
+        "published_estimated": estimated,
+        "language":        "en",
         "fetched_at":      datetime.utcnow().isoformat(),
         "body":            body,
         "credibility":     credibility,
@@ -429,7 +444,7 @@ def _fetch_nytimes():
                 title = item.get("title", "").strip()
                 if not link or not title or db.article_exists(link):
                     continue
-                pub  = item.get("published_date", datetime.utcnow().date().isoformat())
+                pub  = item.get("published_date") or None
                 body = item.get("abstract", "") or ""
                 articles.append(_blank_article(title, link, "NYT Most Emailed", emailed_cat, pub, body, 0.95))
                 count += 1
@@ -454,7 +469,7 @@ def _fetch_nytimes():
                 title = item.get("title", "").strip()
                 if not link or not title or db.article_exists(link):
                     continue
-                pub  = (item.get("published_date") or datetime.utcnow().isoformat())[:10]
+                pub  = (item.get("published_date") or "")[:10] or None
                 body = item.get("abstract", "") or ""
                 articles.append(_blank_article(title, link, "NYT World", world_cat, pub, body, 0.95))
                 count += 1
@@ -518,7 +533,7 @@ def _fetch_newsdata():
             title = (item.get("title") or "").strip()
             if not link or not title or db.article_exists(link):
                 continue
-            pub  = item.get("pubDate", datetime.utcnow().isoformat())
+            pub  = item.get("pubDate") or None
             # Use full content if available, fall back to description
             body = item.get("full_description") or item.get("description") or item.get("content") or ""
             src  = item.get("source_id") or item.get("source_name") or "NewsData"

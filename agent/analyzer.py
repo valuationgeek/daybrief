@@ -18,9 +18,6 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from keybert import KeyBERT
-
 from . import config
 from .llm import generate, reset_breaker
 from .text import (
@@ -30,15 +27,27 @@ from .text import (
 
 log = logging.getLogger("daybrief.analyzer")
 
+# Loaded on first use, not at import: both pull in heavy dependencies
+# (KeyBERT brings torch), and the offline tests import this module without them.
 _kbert = None
-_vader = SentimentIntensityAnalyzer()
+_vader = None
+
 
 def _get_keybert():
     global _kbert
     if _kbert is None:
+        from keybert import KeyBERT
         log.info("Loading KeyBERT model...")
         _kbert = KeyBERT(model="all-MiniLM-L6-v2")
     return _kbert
+
+
+def _get_vader():
+    global _vader
+    if _vader is None:
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        _vader = SentimentIntensityAnalyzer()
+    return _vader
 
 
 # ─────────────────────────────────────────────────────────────
@@ -124,7 +133,12 @@ def _pub_date_str(published):
     return dt.strftime("%B %Y")
 
 
-def _date_line(published):
+def _date_line(published, estimated=False):
+    """The prompt's publication line, or "" when the date isn't the article's
+    own: the collector and preprocessor fill a missing date with the fetch
+    time (published_estimated), and that must not be stated as fact."""
+    if estimated:
+        return ""
     month = _pub_date_str(published)
     if not month:
         return ""
@@ -135,7 +149,7 @@ def _date_line(published):
     )
 
 
-def _summarize_and_angle(title, body, published=""):
+def _summarize_and_angle(title, body, published="", estimated=False):
     """
     Returns (summary, read_angle).
 
@@ -154,7 +168,7 @@ def _summarize_and_angle(title, body, published=""):
     # anything that still overruns back to the last full sentence.
     summary = generate(
         _SUMMARY_PROMPT.format(
-            title=title, body=body[:12000], date_line=_date_line(published)
+            title=title, body=body[:12000], date_line=_date_line(published, estimated)
         ),
         max_tokens=400,
     )
@@ -164,7 +178,9 @@ def _summarize_and_angle(title, body, published=""):
         summary = extractive_summary(body) or title
     source  = f"{title}. {body}"
     summary = strip_meta(summary)
-    summary = fix_stale_descriptors(summary, body)
+    # Against title + body: a "Former PM …" headline grounds "former" even
+    # when the body never repeats it.
+    summary = fix_stale_descriptors(summary, source)
     summary = strip_ungrounded_dates(summary, source)
     log_ungrounded_numbers(summary, source, title)
 
@@ -212,7 +228,7 @@ def _extract_keywords(text, top_n=8):
 def _analyze_sentiment(text):
     if not text:
         return 0.0, "neutral"
-    compound = _vader.polarity_scores(text[:1000])["compound"]
+    compound = _get_vader().polarity_scores(text[:1000])["compound"]
     label    = "positive" if compound >= 0.05 else ("negative" if compound <= -0.05 else "neutral")
     return round(compound, 4), label
 
@@ -234,7 +250,9 @@ def analyze_article(article):
         article["read_angle"]  = ""
         article["impact"]      = ""   # keep for DB compatibility
     else:
-        summary, read_angle    = _summarize_and_angle(title, body, article.get("published", ""))
+        summary, read_angle    = _summarize_and_angle(
+            title, body, article.get("published", ""), article.get("published_estimated", False)
+        )
         article["summary"]     = summary
         article["read_angle"]  = read_angle
         article["impact"]      = read_angle   # keep for DB compatibility

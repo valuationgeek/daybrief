@@ -187,12 +187,27 @@ def test_duplicate_url_is_fetched_once_and_applied_to_both(monkeypatch):
     assert all(a["body"] == page for a in articles)
 
 
-def test_non_english_and_long_bodies_are_not_refetched(monkeypatch):
+def test_non_english_with_a_real_body_and_long_bodies_are_not_refetched(monkeypatch):
     calls = _fake_fetch(monkeypatch, lambda url: ("", True))
-    articles = _articles(["https://example.cn/a"], language="zh")
-    articles += [{"url": "https://example.com/long", "title": "t", "body": "x" * 9500}]
+    articles = [{"url": "https://example.cn/a", "title": "t", "body": "字" * 400, "language": "zh"},
+                {"url": "https://example.com/long", "title": "t", "body": "x" * 9500}]
     collector._enrich_bodies(articles)
     assert calls == []
+
+
+def test_title_only_non_english_entry_is_rescued(monkeypatch):
+    page = "央行宣布下调利率，以支持经济增长。" * 20
+    calls = _fake_fetch(monkeypatch, lambda url: (page, True))
+    articles = [{"url": "https://example.cn/rate", "title": "央行降息", "body": "", "language": "zh"}]
+    collector._enrich_bodies(articles)
+    assert calls == ["https://example.cn/rate"] and articles[0]["body"] == page
+
+
+def test_missing_publication_date_is_marked_estimated():
+    a = collector._blank_article("T", "https://example.com/a", "S", "world", None)
+    assert a["published_estimated"] and a["published"]
+    b = collector._blank_article("T", "https://example.com/b", "S", "world", "2026-11-07T08:00:00+00:00")
+    assert not b["published_estimated"]
 
 
 def test_malformed_link_does_not_abort_enrichment(monkeypatch):

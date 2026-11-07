@@ -94,6 +94,7 @@ def process(articles: list[dict]) -> list[dict]:
             article["published"] = dt.isoformat()
         except Exception:
             article["published"] = datetime.utcnow().isoformat()
+            article["published_estimated"] = True   # not when it came out — see analyzer._date_line
 
         # Word count
         article["word_count"] = len(body.split())
