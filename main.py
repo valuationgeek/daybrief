@@ -90,7 +90,14 @@ def run_pipeline():
 
         # ── Stage 6: Decision Support ─────────────────
         log.info("Stage 6 — Decision support…")
-        trends   = detect_trends(shown_articles)
+        # Trends are optional: a DB error here ("database is locked") used to
+        # abort the run after the articles were saved, so they never reached
+        # any digest (the next run skips URLs already in the DB).
+        try:
+            trends = detect_trends(shown_articles)
+        except Exception as e:
+            log.exception(f"Trend detection failed — continuing without trends: {e}")
+            trends = []
         insights = generate_insights(shown_articles, shown_clusters, trends)
         alerts   = get_alerts(shown_articles)
 
@@ -114,7 +121,7 @@ def run_pipeline():
                 fn(*args)
             except Exception as e:
                 log.exception(f"Output '{name}' failed: {e}")
-                output_errors.append(f"{name}: {e}")
+                output_errors.append(config.redact(f"{name}: {e}"))
 
         run_output("obsidian", obsidian.write, shown_articles, shown_clusters, insights, trends)
         run_output("email", email_digest.send, shown_articles, shown_clusters, insights, trends)
@@ -135,7 +142,8 @@ def run_pipeline():
     except Exception as e:
         log.exception(f"Pipeline failed: {e}")
         stats["status"] = "error"
-        stats["errors"] = str(e)
+        # run_log keeps this for good, and HTTP errors can carry a key.
+        stats["errors"] = config.redact(str(e))
         raise
     finally:
         stats["finished_at"] = datetime.utcnow().isoformat()
