@@ -15,8 +15,10 @@ breaking: {{ breaking_count }}
 
 ## 💡 Key Insights & Alerts
 
+{#- Every field from a feed or the LLM goes through md / md_link (agent/outputs/safe_text.py),
+    so it can't add links, embeds, HTML, code or DataviewJS to the note. -#}
 {% for insight in insights -%}
-- {{ insight }}
+- {{ insight | md }}
 {% endfor %}
 ---
 
@@ -27,15 +29,15 @@ breaking: {{ breaking_count }}
 
 ### 🔗 Cross-Source Stories
 {% for cluster in cat.clusters %}
-#### {{ flag_emoji(cluster.flags) }} {{ cluster.top_keywords[0] if cluster.top_keywords else 'Event' }} · {{ cluster.source_count }} sources
-**Summary:** {{ cluster.unified_summary }}
-**Sources:** {% for s in cluster.sources %}*{{ s }}*{% if not loop.last %}, {% endif %}{% endfor %}
-**Tags:** {% for kw in cluster.top_keywords[:5] %}`{{ kw }}`{% if not loop.last %} · {% endif %}{% endfor %} · **Score:** {{ "%.2f"|format(cluster.score) }}{% if 'BREAKING' in cluster.flags %} 🔴{% elif 'PRIORITY' in cluster.flags %} 🟡{% endif %}
+#### {{ flag_emoji(cluster.flags) }} {{ (cluster.headline or 'Multi-source story') | md }} · {{ cluster.source_count }} sources
+**Summary:** {{ cluster.unified_summary | md }}
+**Sources:** {% for s in cluster.sources %}*{{ s | md }}*{% if not loop.last %}, {% endif %}{% endfor %}
+{% if cluster.top_keywords %}**Tags:** {% for kw in cluster.top_keywords[:5] %}`{{ kw | md_code }}`{% if not loop.last %} · {% endif %}{% endfor %} · {% endif %}**Score:** {{ "%.2f"|format(cluster.score) }}{% if 'BREAKING' in cluster.flags %} 🔴{% elif 'PRIORITY' in cluster.flags %} 🟡{% endif %}
 
 | Source | Title |
 |--------|-------|
 {% for title, source, url in zip(cluster.titles, cluster.sources, cluster.urls) -%}
-| *{{ source }}* | [{{ title[:90] }}]({{ url }}) |
+| *{{ source | md }}* | {{ md_link(title[:90], url) }} |
 {% endfor %}
 
 {% endfor %}
@@ -43,11 +45,11 @@ breaking: {{ breaking_count }}
 {% if cat.solo_articles %}
 ### 📄 Stories
 {% for article in cat.solo_articles %}
-#### {{ flag_emoji(article.flags) }} [{{ article.title }}]({{ article.url }})
-{{ sentiment_emoji(article.sentiment_label) }} *{{ article.source }}* · {{ article.published[:10] }} · Score {{ "%.2f"|format(article.score or 0) }}
-**Summary:** {{ article.summary or article.body[:300] }}
-{% if article.read_angle %}**Read Angle:** {{ article.read_angle }}{% endif %}
-{% if article.keywords %}**Tags:** {% for kw in article.keywords[:5] %}`{{ kw }}`{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+#### {{ flag_emoji(article.flags) }} {{ md_link(article.title, article.url) }}
+{% if article.sentiment_label %}{{ sentiment_emoji(article.sentiment_label) }} {% endif %}*{{ article.source | md }}* · {{ article.published[:10] | md }} · Score {{ "%.2f"|format(article.score or 0) }}
+**Summary:** {{ (article.summary or article.body[:300]) | md }}
+{% if article.read_angle %}**Read Angle:** {{ article.read_angle | md }}{% endif %}
+{% if article.keywords %}**Tags:** {% for kw in article.keywords[:5] %}`{{ kw | md_code }}`{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
 
 {% endfor %}
 {% endif %}
@@ -60,7 +62,7 @@ breaking: {{ breaking_count }}
 | Keyword | Today | Avg | Spike |
 |---------|------:|----:|------:|
 {% for t in trends -%}
-| {{ t.keyword }} | {{ t.today_count }} | {{ t.historical_mean }} | {{ t.spike_factor }}× |
+| {{ t.keyword | md }} | {{ t.today_count }} | {{ t.historical_mean }} | {{ t.spike_factor }}× |
 {% else %}
 | *No keyword spikes above baseline today* | | | |
 {% endfor %}

@@ -146,6 +146,9 @@ def fuse_all(articles):
 
         all_kw        = [kw for a in cluster_articles for kw in a.get("keywords", [])]
         top_kw        = [kw for kw, _ in Counter(all_kw).most_common(10)]
+        # The heading: members' keywords rarely overlap, so the first keyword
+        # was usually just the first member's ("branson did").
+        lead          = max(cluster_articles, key=lambda a: a.get("score") or 0)
         avg_score     = sum(a.get("score") or 0 for a in cluster_articles) / len(cluster_articles)
         cluster_score = min(1.0, avg_score + 0.05 * len(cluster_articles))
 
@@ -162,6 +165,7 @@ def fuse_all(articles):
             "source_count":    len(cluster_articles),
             "sources":         [a["source"] for a in cluster_articles],
             "titles":          [a["title"]  for a in cluster_articles],
+            "headline":        lead["title"],   # highest-scored member's title
             "urls":            [a["url"]    for a in cluster_articles],  # Fix #6
             "unified_summary": unified,
             "top_keywords":    top_kw,

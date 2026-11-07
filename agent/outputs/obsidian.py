@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from jinja2 import Environment, FileSystemLoader
 
 from .. import config
+from . import labels, safe_text
 
 log = logging.getLogger("daybrief.obsidian")
 TEMPLATE_NAME = "daily_note.md.j2"
@@ -70,10 +71,6 @@ def _flag_emoji(flags):
     return "🟢"
 
 
-def _sentiment_emoji(label):
-    return {"positive": "😊", "negative": "😟", "neutral": "😐"}.get(label or "neutral", "😐")
-
-
 # ─────────────────────────────────────────────────────────────
 # Main write function
 # ─────────────────────────────────────────────────────────────
@@ -126,13 +123,16 @@ def write(articles, clusters, insights, trends, run_date=None):
             "total":         len(cat_articles),
         })
 
+    # autoescape is for HTML, not Markdown. Feed and LLM text goes through the
+    # md filter and md_link instead (outputs/safe_text.py), in the template.
     env = Environment(
         loader=FileSystemLoader(str(Path(__file__).parent.parent.parent / "templates")),
         autoescape=False,
     )
     env.globals["flag_emoji"]      = _flag_emoji
-    env.globals["sentiment_emoji"] = _sentiment_emoji
+    env.globals["sentiment_emoji"] = labels.sentiment_emoji
     env.globals["zip"]             = zip
+    safe_text.register(env)
 
     template = env.get_template(TEMPLATE_NAME)
     content  = template.render(

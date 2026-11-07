@@ -45,3 +45,17 @@ def test_format_digest_stays_within_limit_and_keeps_tags_balanced():
     assert len(out) <= MAX_MSG_LEN
     for tag in ("b", "i", "a", "code"):
         assert out.count(f"<{tag}>") + out.count(f"<{tag} ") == out.count(f"</{tag}>")
+
+
+def test_unsafe_link_is_dropped_and_none_label_has_no_icon():
+    out = _format_article({"title": "T", "url": "javascript:alert(1)", "source": "S",
+                           "summary": "s", "score": 0.5, "sentiment_label": None})
+    assert "javascript:" not in out and "<a href" not in out
+    assert "😐" not in out
+
+
+def test_cluster_heading_is_the_lead_title():
+    clusters = [{"headline": "Fed holds rates <steady>", "top_keywords": ["branson did"],
+                 "source_count": 3, "unified_summary": "s", "score": 0.9, "flags": []}]
+    out = _format_digest([], clusters, [], [], "2026-11-07")
+    assert "Fed holds rates &lt;steady&gt;" in out and "branson did" not in out

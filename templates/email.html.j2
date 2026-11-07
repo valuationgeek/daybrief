@@ -89,7 +89,7 @@
     <div class="cluster">
       <span class="cluster-tag">{{ cluster.source_count }} sources</span>
       {% if 'BREAKING' in cluster.flags %}<span class="badge breaking">🔴 BREAKING</span>{% elif 'PRIORITY' in cluster.flags %}<span class="badge priority">🟡 PRIORITY</span>{% endif %}
-      <h3>{{ cluster.top_keywords[0] | capitalize if cluster.top_keywords else 'Multi-source Story' }}</h3>
+      <h3>{{ cluster.headline or 'Multi-source story' }}</h3>
       <div class="lbl">Summary</div>
       <div class="body-text">{{ cluster.unified_summary }}</div>
       {% if cluster.top_keywords %}
@@ -101,7 +101,7 @@
           {% for title, source, url in zip(cluster.titles, cluster.sources, cluster.urls) %}
           <tr>
             <td>{{ source }}</td>
-            <td><a href="{{ url }}">{{ title[:80] }}</a></td>
+            <td>{% if url | safe_url %}<a href="{{ url | safe_url }}">{{ title[:80] }}</a>{% else %}{{ title[:80] }}{% endif %}</td>
           </tr>
           {% endfor %}
         </table>
@@ -114,8 +114,8 @@
     <div class="article">
       {% if 'BREAKING' in article.flags %}<span class="badge breaking">🔴 BREAKING</span>
       {% elif 'PRIORITY' in article.flags %}<span class="badge priority">🟡 PRIORITY</span>{% endif %}
-      <span class="badge {{ sentiment_class(article.sentiment_label) }}">{{ article.sentiment_label or 'neutral' }}</span>
-      <div><a href="{{ article.url }}">{{ article.title }}</a></div>
+      {% if article.sentiment_label %}<span class="badge {{ sentiment_class(article.sentiment_label) }}">{{ article.sentiment_label }}</span>{% endif %}
+      <div>{% if article.url | safe_url %}<a href="{{ article.url | safe_url }}">{{ article.title }}</a>{% else %}{{ article.title }}{% endif %}</div>
       <div class="meta">{{ article.source }} · {{ article.published[:10] }}</div>
       {% if article.summary %}
       <div class="lbl">Summary</div>

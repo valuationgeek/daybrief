@@ -235,7 +235,12 @@ def analyze_article(article):
         article["impact"]      = read_angle   # keep for DB compatibility
 
     article["keywords"]        = _extract_keywords(combined)
-    article["sentiment"], article["sentiment_label"] = _analyze_sentiment(combined)
+    if language == "en":
+        article["sentiment"], article["sentiment_label"] = _analyze_sentiment(combined)
+    else:
+        # VADER only reads English: on other text it returns 0.0, which would
+        # show as a confident "neutral". None means "not measured".
+        article["sentiment"], article["sentiment_label"] = 0.0, None
     return article
 
 
@@ -249,7 +254,7 @@ def _fallback_analysis(article):
     article["impact"]          = ""
     article["keywords"]        = article.get("keywords") or []
     article["sentiment"]       = article.get("sentiment") or 0.0
-    article["sentiment_label"] = article.get("sentiment_label") or "neutral"
+    article["sentiment_label"] = article.get("sentiment_label")   # None: not measured
     return article
 
 

@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from jinja2 import Environment, FileSystemLoader
 
 from .. import config
+from . import labels, safe_text
 
 log = logging.getLogger("daybrief.email")
 
@@ -45,10 +46,6 @@ def _flag_emoji(flags):
     if "CRISIS" in flags:
         return "⚠️"
     return "🟢"
-
-
-def _sentiment_class(label):
-    return {"positive": "pos", "negative": "neg", "neutral": "neu"}.get(label or "neutral", "neu")
 
 
 def _build_html(articles, clusters, insights, trends, today, cfg_display):
@@ -96,8 +93,9 @@ def _build_html(articles, clusters, insights, trends, today, cfg_display):
         autoescape=True,
     )
     env.globals["flag_emoji"]      = _flag_emoji
-    env.globals["sentiment_class"] = _sentiment_class
+    env.globals["sentiment_class"] = labels.sentiment_class
     env.globals["zip"]             = zip
+    safe_text.register(env)   # safe_url: only http(s) links reach an href
 
     template = env.get_template("email.html.j2")
     return template.render(
