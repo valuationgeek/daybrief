@@ -66,6 +66,12 @@ llm:
   # "ollama" = local, free   |   "openai" = any OpenAI-compatible API (paid,
   # higher quality; also the option for headless/cloud runs without Ollama)
   provider: "ollama"
+  # Circuit breaker, for either provider: after this many failed calls in a
+  # row, use extractive summaries instead of waiting on a dead endpoint...
+  failure_threshold: 3
+  # ...and every this many seconds, let one call through to check whether it
+  # is answering again (a restarting Ollama, a brief API outage)
+  breaker_cooldown_seconds: 60
   ollama:
     # Change base_url if Ollama runs on another machine or in a container
     base_url: "http://localhost:11434"
@@ -81,9 +87,8 @@ llm:
     # OLLAMA_NUM_PARALLEL (Ollama normally runs one at a time); extra
     # requests wait here, so their wait doesn't count against `timeout`
     max_concurrent: 1
-    # After this many failed calls in a row, stop calling Ollama for the
-    # rest of the run and use extractive summaries instead
-    failure_threshold: 3
+    # Seconds to wait before retrying a failed call (timeouts aren't retried)
+    retry_delay: 3
   openai:
     # Leave base_url blank for api.openai.com, or point it at any other
     # OpenAI-compatible endpoint, e.g.:
@@ -96,6 +101,8 @@ llm:
     api_key: "${OPENAI_API_KEY:-}"
     # Seconds per request before it is abandoned (SDK default is 10 minutes)
     timeout: 120
+    # Retries per request, timeouts included (SDK default is 2)
+    max_retries: 1
 
 # General agent settings
 agent:

@@ -22,7 +22,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from keybert import KeyBERT
 
 from . import config
-from .llm import generate
+from .llm import generate, reset_breaker
 from .text import (
     clip, extractive_summary, fix_stale_descriptors, log_ungrounded_numbers,
     strip_meta, strip_ungrounded_dates,
@@ -158,7 +158,8 @@ def _summarize_and_angle(title, body, published=""):
         ),
         max_tokens=400,
     )
-    if not summary:
+    from_llm = bool(summary)
+    if not from_llm:
         log.warning(f"No LLM summary — extractive fallback for: {title[:60]}")
         summary = extractive_summary(body) or title
     source  = f"{title}. {body}"
@@ -169,6 +170,10 @@ def _summarize_and_angle(title, body, published=""):
 
     # Step 2: read angle (uses summary as input — no re-sending full article)
     # Same tokens-vs-words trap: a ≤50-word sentence does not fit in 50 tokens.
+    # Skipped after a fallback: the LLM just failed on this article, and a
+    # second call would only cost another timeout.
+    if not from_llm:
+        return summary, ""
     read_angle = generate(
         _READ_ANGLE_PROMPT.format(summary=summary),
         max_tokens=100,
@@ -261,11 +266,11 @@ def _fallback_analysis(article):
 def analyze_all(articles, max_workers=3):
     log.info(f"Analyzing {len(articles)} articles...")
 
+    reset_breaker()   # every run starts with a closed breaker, whatever the provider
     # Load the model once, serially, before the pool starts — otherwise every
     # worker races on the same cold load and they all hit the timeout together.
     if config.settings()["llm"].get("provider", "ollama") == "ollama":
-        from .ollama_client import reset_breaker, warm_up
-        reset_breaker()
+        from .ollama_client import warm_up
         warm_up()
 
     results = [None] * len(articles)

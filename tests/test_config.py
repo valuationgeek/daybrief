@@ -146,3 +146,12 @@ def test_logged_lines_and_tracebacks_are_redacted(secrets):
     text = stream.getvalue()
     assert "Nyt5ecretValue" not in text and "pub_9f8e7d6c5b" not in text
     assert text.count("***") >= 2
+
+
+
+def test_validate_warns_when_the_old_60s_ollama_timeout_is_still_set(monkeypatch):
+    _patch(monkeypatch, GOOD_FEEDS, GOOD_SOURCES)
+    monkeypatch.setattr(config, "settings", lambda: {"llm": {"provider": "ollama", "ollama": {"timeout": 60}}})
+    assert any("llm.ollama.timeout is 60s" in w for w in config.validate())
+    monkeypatch.setattr(config, "settings", lambda: {"llm": {"provider": "ollama", "ollama": {"timeout": 180}}})
+    assert config.validate() == []

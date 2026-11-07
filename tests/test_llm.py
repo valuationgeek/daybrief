@@ -1,4 +1,4 @@
-"""Offline tests for agent/llm.py — the Ollama path with a fake client."""
+"""Offline tests for agent/llm.py — both providers with fake clients, and the breaker."""
 
 import threading
 import time
@@ -24,10 +24,13 @@ class FakeClient:
 
 
 @pytest.fixture(autouse=True)
-def fresh_breaker():
-    ollama_client.reset_breaker()
-    yield
-    ollama_client.reset_breaker()
+def fresh_breaker(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(llm.time, "sleep", sleeps.append)
+    monkeypatch.setattr(config, "settings", lambda: {"llm": {"ollama": {"model": "m"}}})
+    llm.reset_breaker()
+    yield sleeps
+    llm.reset_breaker()
 
 
 @pytest.fixture
@@ -99,7 +102,7 @@ def test_breaker_opens_after_consecutive_failures(monkeypatch, ollama_settings):
 
     for _ in range(3):
         assert llm.generate("prompt") == ""
-    assert ollama_client.breaker_open()
+    assert llm.breaker_open()
     calls_before = len(client.calls)
     assert llm.generate("prompt") == ""
     assert len(client.calls) == calls_before   # breaker open — client never touched
@@ -112,7 +115,7 @@ def test_success_resets_the_failure_count(monkeypatch, ollama_settings):
     llm.generate("prompt")   # fails (2 attempts)
     llm.generate("prompt")   # succeeds
     llm.generate("prompt")   # fails
-    assert not ollama_client.breaker_open()
+    assert not llm.breaker_open()
 
 
 def test_slot_caps_concurrent_generate_calls(monkeypatch, ollama_settings):
@@ -136,3 +139,107 @@ def test_slot_caps_concurrent_generate_calls(monkeypatch, ollama_settings):
     for t in threads:
         t.join()
     assert state["peak"] == 1   # max_concurrent defaults to 1
+
+
+
+def test_failed_call_is_retried_after_a_backoff(monkeypatch, ollama_settings, fresh_breaker):
+    ok = SimpleNamespace(response="ok.", done_reason="stop")
+    _install(monkeypatch, FakeClient([ConnectionError("refused"), ok]))
+    assert llm.generate("prompt") == "ok."
+    assert fresh_breaker == [3]   # llm.ollama.retry_delay default
+
+
+def _open_breaker(monkeypatch, clock):
+    monkeypatch.setattr(llm.time, "monotonic", lambda: clock["now"])
+    for _ in range(3):
+        llm.record_result(False)
+    assert llm.breaker_open()
+
+
+def test_open_breaker_lets_one_probe_through_after_the_cooldown(monkeypatch, ollama_settings):
+    clock = {"now": 1000.0}
+    _open_breaker(monkeypatch, clock)
+    client = FakeClient([SimpleNamespace(response="back.", done_reason="stop")])
+    _install(monkeypatch, client)
+
+    clock["now"] += 30
+    assert llm.generate("prompt") == "" and client.calls == []   # still cooling down
+    clock["now"] += 31
+    assert llm.generate("prompt") == "back."                        # the probe
+    assert not llm.breaker_open() and len(client.calls) == 1
+
+
+def test_failed_probe_keeps_the_breaker_open_for_another_cooldown(monkeypatch, ollama_settings):
+    clock = {"now": 1000.0}
+    _open_breaker(monkeypatch, clock)
+    client = FakeClient([httpx.ReadTimeout("still down")])
+    _install(monkeypatch, client)
+
+    clock["now"] += 61
+    assert llm.generate("prompt") == ""
+    assert llm.breaker_open() and len(client.calls) == 1
+    clock["now"] += 30
+    assert llm.generate("prompt") == "" and len(client.calls) == 1
+
+
+def test_call_queued_behind_a_failure_rechecks_the_breaker(monkeypatch, ollama_settings):
+    import contextlib
+
+    client = FakeClient([SimpleNamespace(response="never sent.", done_reason="stop")])
+    _install(monkeypatch, client)
+
+    @contextlib.contextmanager
+    def slot_that_others_failed_behind():
+        for _ in range(3):   # while this call waited, three others failed
+            llm.record_result(False)
+        yield
+
+    monkeypatch.setattr(ollama_client, "slot", slot_that_others_failed_behind)
+    assert llm.generate("prompt") == ""
+    assert client.calls == []
+
+
+# ── OpenAI-compatible provider ───────────────────────────────
+
+def _fake_openai(monkeypatch, outcomes):
+    import sys
+    import types
+
+    made = []
+
+    class Completions:
+        def create(self, **kwargs):
+            result = outcomes.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    class OpenAI:
+        def __init__(self, **kwargs):
+            made.append(kwargs)
+            self.chat = SimpleNamespace(completions=Completions())
+
+    module = types.ModuleType("openai")
+    module.OpenAI = OpenAI
+    monkeypatch.setitem(sys.modules, "openai", module)
+    monkeypatch.setattr(config, "settings", lambda: {"llm": {"provider": "openai",
+                                                             "openai": {"api_key": "k", "model": "m"}}})
+    return made
+
+
+def _completion(text, reason="stop"):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text), finish_reason=reason)])
+
+
+def test_openai_client_retries_once_not_twice(monkeypatch):
+    made = _fake_openai(monkeypatch, [_completion("A summary.")])
+    assert llm.generate("prompt") == "A summary."
+    assert made[0]["max_retries"] == 1 and made[0]["timeout"] == 120
+
+
+def test_breaker_covers_the_openai_provider(monkeypatch):
+    made = _fake_openai(monkeypatch, [TimeoutError("hung")] * 3)
+    for _ in range(3):
+        assert llm.generate("prompt") == ""
+    assert llm.breaker_open()
+    assert llm.generate("prompt") == "" and len(made) == 3   # no fourth client, no fourth timeout

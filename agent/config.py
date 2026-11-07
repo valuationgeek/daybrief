@@ -215,6 +215,19 @@ def validate() -> list:
             f"expected 1.0 — scores will be skewed"
         )
 
+    try:
+        llm_cfg = settings().get("llm", {})
+    except Exception:
+        llm_cfg = {}   # no settings.yaml yet; load() reports that on its own
+    ollama_timeout = (llm_cfg.get("ollama") or {}).get("timeout")
+    if llm_cfg.get("provider", "ollama") == "ollama" and isinstance(ollama_timeout, (int, float)) \
+            and ollama_timeout < 120:
+        warnings.append(
+            f"settings.yaml: llm.ollama.timeout is {ollama_timeout}s. Older example configs shipped 60, "
+            f"which used to be ignored and is now enforced per call — 180 is the default; a long "
+            f"article on a CPU-only model can take more than 60s"
+        )
+
     for w in warnings:
         log.warning(f"Config check: {w}")
     return warnings
