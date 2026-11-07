@@ -9,9 +9,7 @@ Index:  appends each run as a new line — never overwrites old entries.
 """
 
 import logging
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -25,15 +23,6 @@ TEMPLATE_NAME = "daily_note.md.j2"
 # ─────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────
-
-def _local_now():
-    tz_str = config.settings()["agent"].get("timezone", "UTC")
-    try:
-        tz = ZoneInfo(tz_str)
-    except Exception:
-        tz = ZoneInfo("UTC")
-    return datetime.now(tz)
-
 
 def _format_title_datetime(dt):
     """Human-readable datetime for the note heading."""
@@ -81,7 +70,7 @@ def write(articles, clusters, insights, trends, run_date=None):
         log.info("Obsidian output disabled — skipping")
         return
 
-    now        = _local_now()
+    now        = config.local_now()
     today      = run_date or now.date().isoformat()
     title_dt   = _format_title_datetime(now)
 

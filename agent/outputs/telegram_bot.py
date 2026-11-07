@@ -10,7 +10,6 @@ or "[" made Telegram reject the whole message ("can't parse entities").
 import html
 import logging
 import asyncio
-from datetime import datetime
 
 from .. import config
 from .labels import sentiment_emoji
@@ -151,7 +150,9 @@ def send_digest(articles, clusters, insights, trends):
         log.info("Telegram output disabled — skipping")
         return
 
-    today = datetime.utcnow().date().isoformat()
+    # The configured timezone, as the email and Obsidian note use: UTC put
+    # the morning digest on yesterday's date anywhere ahead of UTC.
+    today = config.local_now().date().isoformat()
     try:
         text = _format_digest(articles, clusters, insights, trends, today)
         _send(text)

@@ -12,8 +12,10 @@ import re
 import yaml
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -160,6 +162,19 @@ def watchlist() -> dict:
 
 def settings() -> dict:
     return load("settings")
+
+
+def local_now() -> datetime:
+    """Now in settings.yaml → agent.timezone (UTC if unset or unknown).
+
+    Every output dates the digest with this, so the email subject, the
+    Obsidian note and the Telegram header agree on the day.
+    """
+    try:
+        tz = ZoneInfo(settings()["agent"].get("timezone") or "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz)
 
 
 def validate() -> list:

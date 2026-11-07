@@ -59,3 +59,22 @@ def test_cluster_heading_is_the_lead_title():
                  "source_count": 3, "unified_summary": "s", "score": 0.9, "flags": []}]
     out = _format_digest([], clusters, [], [], "2026-11-07")
     assert "Fed holds rates &lt;steady&gt;" in out and "branson did" not in out
+
+
+def test_digest_is_dated_in_the_configured_timezone(monkeypatch):
+    from datetime import datetime, timezone
+
+    from agent.outputs import telegram_bot
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):   # 23:30 UTC on Mar 1 is 07:30 on Mar 2 in Hong Kong
+            return datetime(2025, 3, 1, 23, 30, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(config, "datetime", Frozen)
+    monkeypatch.setattr(config, "settings", lambda: {"telegram": {"enabled": True},
+                                                     "agent": {"timezone": "Asia/Hong_Kong"}})
+    sent = []
+    monkeypatch.setattr(telegram_bot, "_send", sent.append)
+    telegram_bot.send_digest([], [], [], [])
+    assert "2025-03-02" in sent[0]
