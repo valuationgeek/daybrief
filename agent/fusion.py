@@ -12,32 +12,22 @@ import logging
 from collections import Counter
 from datetime import datetime
 
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from .embed_model import encode_lock, get_model
 from .llm import generate
 from .text import fix_stale_descriptors, strip_meta, strip_ungrounded_dates
 
 log = logging.getLogger("daybrief.fusion")
 
-_embed_model = None
-
-
-def _get_embed_model():
-    global _embed_model
-    if _embed_model is None:
-        log.info("Loading sentence-transformer model...")
-        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embed_model
-
-
 def _embed_articles(articles):
-    model = _get_embed_model()
+    model = get_model()   # pinned and shared with KeyBERT (agent/embed_model.py)
     texts = [
         f"{a['title']}. {a.get('summary') or a.get('body', '')[:300]}"
         for a in articles
     ]
-    return model.encode(texts, batch_size=32, show_progress_bar=False)
+    with encode_lock:
+        return model.encode(texts, batch_size=32, show_progress_bar=False)
 
 
 def _cluster_articles(embeddings, threshold=0.78):

@@ -57,7 +57,6 @@ def test_non_english_article_has_no_sentiment_label(llm):
 def test_fusion_clusters_english_articles_only(monkeypatch):
     np = pytest.importorskip("numpy")
     pytest.importorskip("sklearn")
-    pytest.importorskip("sentence_transformers")   # imported at the top of fusion.py
     from agent import fusion
 
     monkeypatch.setattr(fusion, "_embed_articles", lambda arts: np.ones((len(arts), 4)))

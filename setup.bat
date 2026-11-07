@@ -73,7 +73,7 @@ python -c "from agent.db import init_db; init_db(); print('  Database ready: db/
 REM ── 6. Download sentence-transformer model ────────────
 echo.
 echo [6/7] Downloading sentence-transformer model (~90 MB, one-time)...
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2'); print('  Model ready.')"
+python -m agent.embed_model
 
 REM ── 7. Check Ollama ───────────────────────────────────
 echo.

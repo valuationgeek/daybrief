@@ -37,8 +37,10 @@ def _get_keybert():
     global _kbert
     if _kbert is None:
         from keybert import KeyBERT
-        log.info("Loading KeyBERT model...")
-        _kbert = KeyBERT(model="all-MiniLM-L6-v2")
+        from .embed_model import get_model
+        # The shared, pinned model (agent/embed_model.py). Given a name,
+        # KeyBERT loaded its own unpinned copy next to fusion's.
+        _kbert = KeyBERT(model=get_model())
     return _kbert
 
 
@@ -207,14 +209,17 @@ def _extract_keywords(text, top_n=8):
     if not text or len(text.split()) < 10:
         return []
     try:
-        results = _get_keybert().extract_keywords(
-            text,
-            keyphrase_ngram_range=(1, 2),
-            stop_words="english",
-            top_n=top_n,
-            use_mmr=True,
-            diversity=0.5,
-        )
+        from .embed_model import encode_lock
+        kbert = _get_keybert()
+        with encode_lock:   # the tokenizer isn't thread-safe; see embed_model
+            results = kbert.extract_keywords(
+                text,
+                keyphrase_ngram_range=(1, 2),
+                stop_words="english",
+                top_n=top_n,
+                use_mmr=True,
+                diversity=0.5,
+            )
         return [kw for kw, _ in results]
     except Exception as e:
         log.warning(f"KeyBERT failed: {e}")
