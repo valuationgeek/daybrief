@@ -22,6 +22,6 @@ jobs:
       # Exact versions with sha256 hashes, wheels only: requirements-ci.lock is
       # made from requirements-ci.txt by tools/make_lock.py. The offline tests
       # only touch light modules, so no torch/transformers.
-      - run: pip install --require-hashes --only-binary :all: -r requirements-ci.lock
+      - run: 'pip install --require-hashes --only-binary :all: -r requirements-ci.lock'
       - run: ruff check .
       - run: pytest -q

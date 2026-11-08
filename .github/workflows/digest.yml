@@ -38,7 +38,7 @@ jobs:
       # This job runs with your secrets, so it installs exact versions with
       # sha256 hashes, wheels only (requirements.lock, from requirements.txt
       # by tools/make_lock.py), never whatever PyPI serves that morning.
-      - run: pip install --require-hashes --only-binary :all: -r requirements.lock
+      - run: 'pip install --require-hashes --only-binary :all: -r requirements.lock'
 
       - name: Restore article database
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
