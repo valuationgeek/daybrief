@@ -252,3 +252,13 @@ def test_gbk_feed_without_an_xml_encoding_decodes_with_the_server_charset():
     parsed = feedparser.parse(xml.encode("gbk"), response_headers={
         "content-type": collector._feed_content_type("text/xml; charset=GBK")})
     assert parsed.entries[0].title == "央行降息"
+
+
+def test_plain_text_rss_summary_skips_the_html_parser(monkeypatch):
+    calls = []
+    monkeypatch.setattr(collector.trafilatura, "extract", lambda text, **kw: calls.append(text) or None)
+    assert collector._rss_body("The Fed held rates steady.") == "The Fed held rates steady."
+    assert collector._rss_body("") == ""
+    assert calls == []
+    collector._rss_body("<p>The Fed held rates steady.</p>")
+    assert len(calls) == 1

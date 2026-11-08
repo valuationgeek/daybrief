@@ -69,6 +69,16 @@ def _strip_html(text):
     return re.sub(r"<[A-Za-z/!][^>]*>", " ", html.unescape(text or "")).strip()
 
 
+def _rss_body(raw_summary):
+    """An entry's body from its RSS summary.
+
+    Only a summary with markup goes to trafilatura: on plain text it finds no
+    HTML tree and logs three ERROR lines per entry, which buried real errors.
+    """
+    extracted = trafilatura.extract(raw_summary) if "<" in raw_summary else None
+    return extracted or _strip_html(raw_summary)[:500]
+
+
 def _is_html(content_type):
     return not content_type or "html" in content_type.lower()
 
@@ -404,8 +414,7 @@ def _fetch_all_rss():
                         continue
                     if db.article_exists(link):
                         continue
-                    raw_summary = getattr(entry, "summary", "") or ""
-                    body    = trafilatura.extract(raw_summary) or _strip_html(raw_summary)[:500]
+                    body    = _rss_body(getattr(entry, "summary", "") or "")
                     article = _blank_article(title, link, source, cat_key, pub, body, credibility)
                     article["language"] = language
                     articles.append(article)
