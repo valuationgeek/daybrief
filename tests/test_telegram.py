@@ -45,3 +45,36 @@ def test_format_digest_stays_within_limit_and_keeps_tags_balanced():
     assert len(out) <= MAX_MSG_LEN
     for tag in ("b", "i", "a", "code"):
         assert out.count(f"<{tag}>") + out.count(f"<{tag} ") == out.count(f"</{tag}>")
+
+
+def test_unsafe_link_is_dropped_and_none_label_has_no_icon():
+    out = _format_article({"title": "T", "url": "javascript:alert(1)", "source": "S",
+                           "summary": "s", "score": 0.5, "sentiment_label": None})
+    assert "javascript:" not in out and "<a href" not in out
+    assert "😐" not in out
+
+
+def test_cluster_heading_is_the_lead_title():
+    clusters = [{"headline": "Fed holds rates <steady>", "top_keywords": ["branson did"],
+                 "source_count": 3, "unified_summary": "s", "score": 0.9, "flags": []}]
+    out = _format_digest([], clusters, [], [], "2026-11-07")
+    assert "Fed holds rates &lt;steady&gt;" in out and "branson did" not in out
+
+
+def test_digest_is_dated_in_the_configured_timezone(monkeypatch):
+    from datetime import datetime, timezone
+
+    from agent.outputs import telegram_bot
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):   # 23:30 UTC on Mar 1 is 07:30 on Mar 2 in Hong Kong
+            return datetime(2025, 3, 1, 23, 30, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(config, "datetime", Frozen)
+    monkeypatch.setattr(config, "settings", lambda: {"telegram": {"enabled": True},
+                                                     "agent": {"timezone": "Asia/Hong_Kong"}})
+    sent = []
+    monkeypatch.setattr(telegram_bot, "_send", sent.append)
+    telegram_bot.send_digest([], [], [], [])
+    assert "2025-03-02" in sent[0]

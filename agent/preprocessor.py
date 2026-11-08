@@ -9,31 +9,40 @@ from datetime import datetime
 
 log = logging.getLogger("daybrief.preprocessor")
 
-# Boilerplate phrases to strip from article bodies
+# Boilerplate: a short trailing segment (at most 150 chars to the end of the
+# line) that STARTS with one of these phrases, at the start of a line or of a
+# sentence. The old patterns matched anywhere and ate everything after the
+# phrase. They were written for short RSS leads, but enrichment now refetches
+# nearly every English body, so "Meta changed its terms of service to let it
+# train AI on …" lost the rest of its paragraph, or the whole article when
+# trafilatura returned it as one line.
 _BOILERPLATE = [
-    r"subscribe to our newsletter.*",
-    r"sign up for.*newsletter.*",
-    r"click here to.*",
-    r"read more:.*",
-    r"related:.*",
-    r"advertisement\s*",
-    r"sponsored content.*",
-    r"share this article.*",
-    r"follow us on.*",
-    r"©.*all rights reserved.*",
-    r"terms of (use|service).*",
+    r"subscribe to our newsletter",
+    r"sign up for\b[^\n]{0,60}\bnewsletter",
+    r"click here to",
+    r"read more:",
+    r"related:",
+    r"sponsored content",
+    r"share this article",
+    r"follow us on",
+    r"©[^\n]{0,80}all rights reserved",
+    r"terms of (?:use|service)",
 ]
 _BOILERPLATE_RE = re.compile(
-    "|".join(_BOILERPLATE), re.IGNORECASE | re.MULTILINE
+    r"(?:^|(?<=[.!?] ))[ \t]*(?:" + "|".join(_BOILERPLATE) + r")[^\n]{0,150}$"
+    r"|^[ \t]*advertisement[ \t]*$",   # only as a line of its own
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # Characters that are never visible text: C0/C1 control codes (except the
 # whitespace ones, which the whitespace collapse handles), zero-width and
 # bidi-control marks, and the BOM. Everything else is real text and stays:
-# accents, curly quotes, dashes, €/£/¥, CJK.
+# accents, curly quotes, dashes, €/£/¥, CJK. The zero-width joiner and
+# non-joiner (U+200D, U+200C) stay too: Persian, the Indic scripts and emoji
+# sequences need them to render correctly.
 _INVISIBLE_RE = re.compile(
     "[\x00-\x08\x0e-\x1f\x7f-\x9f"
-    "\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
+    "\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\ufeff]"
 )
 
 
@@ -94,6 +103,7 @@ def process(articles: list[dict]) -> list[dict]:
             article["published"] = dt.isoformat()
         except Exception:
             article["published"] = datetime.utcnow().isoformat()
+            article["published_estimated"] = True   # not when it came out — see analyzer._date_line
 
         # Word count
         article["word_count"] = len(body.split())

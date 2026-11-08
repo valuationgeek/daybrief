@@ -12,32 +12,22 @@ import logging
 from collections import Counter
 from datetime import datetime
 
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from .embed_model import encode_lock, get_model
 from .llm import generate
 from .text import fix_stale_descriptors, strip_meta, strip_ungrounded_dates
 
 log = logging.getLogger("daybrief.fusion")
 
-_embed_model = None
-
-
-def _get_embed_model():
-    global _embed_model
-    if _embed_model is None:
-        log.info("Loading sentence-transformer model...")
-        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embed_model
-
-
 def _embed_articles(articles):
-    model = _get_embed_model()
+    model = get_model()   # pinned and shared with KeyBERT (agent/embed_model.py)
     texts = [
         f"{a['title']}. {a.get('summary') or a.get('body', '')[:300]}"
         for a in articles
     ]
-    return model.encode(texts, batch_size=32, show_progress_bar=False)
+    with encode_lock:
+        return model.encode(texts, batch_size=32, show_progress_bar=False)
 
 
 def _cluster_articles(embeddings, threshold=0.78):
@@ -118,21 +108,26 @@ def fuse_all(articles):
       - updated articles list (cluster_id set on each article)
       - list of cluster dicts (only clusters with 2+ articles)
     """
-    if len(articles) < 2:
+    # English only. all-MiniLM-L6-v2 can't represent most other languages
+    # (much of the text comes out as unknown tokens), so it merges unrelated
+    # stories, and fusing them would send that text to the LLM, which answers
+    # in English. Non-English articles stay solo with cluster_id None.
+    clusterable = [a for a in articles if a.get("language", "en") == "en"]
+    if len(clusterable) < 2:
         return articles, []
 
-    log.info(f"Clustering {len(articles)} articles across all categories...")
-    embeddings   = _embed_articles(articles)
+    log.info(f"Clustering {len(clusterable)} articles across all categories...")
+    embeddings   = _embed_articles(clusterable)
     raw_clusters = _cluster_articles(embeddings)
     cluster_dicts = []
     today = datetime.utcnow().date().isoformat()
 
     for raw_cluster in raw_clusters:
         cid              = str(uuid.uuid4())[:8]
-        cluster_articles = [articles[i] for i in raw_cluster]
+        cluster_articles = [clusterable[i] for i in raw_cluster]
 
         for i in raw_cluster:
-            articles[i]["cluster_id"] = cid
+            clusterable[i]["cluster_id"] = cid
 
         if len(cluster_articles) < 2:
             continue  # solo article — no fusion needed
@@ -146,6 +141,9 @@ def fuse_all(articles):
 
         all_kw        = [kw for a in cluster_articles for kw in a.get("keywords", [])]
         top_kw        = [kw for kw, _ in Counter(all_kw).most_common(10)]
+        # The heading: members' keywords rarely overlap, so the first keyword
+        # was usually just the first member's ("branson did").
+        lead          = max(cluster_articles, key=lambda a: a.get("score") or 0)
         avg_score     = sum(a.get("score") or 0 for a in cluster_articles) / len(cluster_articles)
         cluster_score = min(1.0, avg_score + 0.05 * len(cluster_articles))
 
@@ -162,6 +160,7 @@ def fuse_all(articles):
             "source_count":    len(cluster_articles),
             "sources":         [a["source"] for a in cluster_articles],
             "titles":          [a["title"]  for a in cluster_articles],
+            "headline":        lead["title"],   # highest-scored member's title
             "urls":            [a["url"]    for a in cluster_articles],  # Fix #6
             "unified_summary": unified,
             "top_keywords":    top_kw,

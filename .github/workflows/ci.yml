@@ -13,13 +13,33 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      # Actions are pinned to a commit, so a moved tag can't change what runs.
+      # Dependabot (.github/dependabot.yml) proposes updates.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      # The offline test suite only touches light modules (preprocessor,
-      # scorer, config, text, llm, net, collector enrichment, email/telegram
-      # formatting) — no torch/transformers install needed for CI.
-      - run: pip install ruff==0.17.3 pytest pyyaml httpx jinja2 ollama feedparser trafilatura
+      # Exact versions with sha256 hashes, wheels only: requirements-ci.lock is
+      # made from requirements-ci.txt by tools/make_lock.py. The offline tests
+      # only touch light modules, so no torch/transformers.
+      - run: 'pip install --require-hashes --only-binary :all: -r requirements-ci.lock'
       - run: ruff check .
       - run: pytest -q
+
+  # Fails a pull request whose commits match the repository variable
+  # BLOCKED_COMMIT_IDENTITIES (Settings → Secrets and variables → Actions →
+  # Variables): a regex checked against author, committer and message lines.
+  # The list lives in the variable, so this public file names no one.
+  commit-identities:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check commit identities and trailers
+        env:
+          BLOCKED_COMMIT_IDENTITIES: ${{ vars.BLOCKED_COMMIT_IDENTITIES }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 tools/check_commits.py "$BASE" "$HEAD"

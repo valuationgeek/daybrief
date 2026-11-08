@@ -18,11 +18,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from keybert import KeyBERT
-
 from . import config
-from .llm import generate
+from .llm import generate, reset_breaker
 from .text import (
     clip, extractive_summary, fix_stale_descriptors, log_ungrounded_numbers,
     strip_meta, strip_ungrounded_dates,
@@ -30,15 +27,29 @@ from .text import (
 
 log = logging.getLogger("daybrief.analyzer")
 
+# Loaded on first use, not at import: both pull in heavy dependencies
+# (KeyBERT brings torch), and the offline tests import this module without them.
 _kbert = None
-_vader = SentimentIntensityAnalyzer()
+_vader = None
+
 
 def _get_keybert():
     global _kbert
     if _kbert is None:
-        log.info("Loading KeyBERT model...")
-        _kbert = KeyBERT(model="all-MiniLM-L6-v2")
+        from keybert import KeyBERT
+        from .embed_model import get_model
+        # The shared, pinned model (agent/embed_model.py). Given a name,
+        # KeyBERT loaded its own unpinned copy next to fusion's.
+        _kbert = KeyBERT(model=get_model())
     return _kbert
+
+
+def _get_vader():
+    global _vader
+    if _vader is None:
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        _vader = SentimentIntensityAnalyzer()
+    return _vader
 
 
 # ─────────────────────────────────────────────────────────────
@@ -124,7 +135,12 @@ def _pub_date_str(published):
     return dt.strftime("%B %Y")
 
 
-def _date_line(published):
+def _date_line(published, estimated=False):
+    """The prompt's publication line, or "" when the date isn't the article's
+    own: the collector and preprocessor fill a missing date with the fetch
+    time (published_estimated), and that must not be stated as fact."""
+    if estimated:
+        return ""
     month = _pub_date_str(published)
     if not month:
         return ""
@@ -135,7 +151,7 @@ def _date_line(published):
     )
 
 
-def _summarize_and_angle(title, body, published=""):
+def _summarize_and_angle(title, body, published="", estimated=False):
     """
     Returns (summary, read_angle).
 
@@ -154,21 +170,28 @@ def _summarize_and_angle(title, body, published=""):
     # anything that still overruns back to the last full sentence.
     summary = generate(
         _SUMMARY_PROMPT.format(
-            title=title, body=body[:12000], date_line=_date_line(published)
+            title=title, body=body[:12000], date_line=_date_line(published, estimated)
         ),
         max_tokens=400,
     )
-    if not summary:
+    from_llm = bool(summary)
+    if not from_llm:
         log.warning(f"No LLM summary — extractive fallback for: {title[:60]}")
         summary = extractive_summary(body) or title
     source  = f"{title}. {body}"
     summary = strip_meta(summary)
-    summary = fix_stale_descriptors(summary, body)
+    # Against title + body: a "Former PM …" headline grounds "former" even
+    # when the body never repeats it.
+    summary = fix_stale_descriptors(summary, source)
     summary = strip_ungrounded_dates(summary, source)
     log_ungrounded_numbers(summary, source, title)
 
     # Step 2: read angle (uses summary as input — no re-sending full article)
     # Same tokens-vs-words trap: a ≤50-word sentence does not fit in 50 tokens.
+    # Skipped after a fallback: the LLM just failed on this article, and a
+    # second call would only cost another timeout.
+    if not from_llm:
+        return summary, ""
     read_angle = generate(
         _READ_ANGLE_PROMPT.format(summary=summary),
         max_tokens=100,
@@ -186,14 +209,17 @@ def _extract_keywords(text, top_n=8):
     if not text or len(text.split()) < 10:
         return []
     try:
-        results = _get_keybert().extract_keywords(
-            text,
-            keyphrase_ngram_range=(1, 2),
-            stop_words="english",
-            top_n=top_n,
-            use_mmr=True,
-            diversity=0.5,
-        )
+        from .embed_model import encode_lock
+        kbert = _get_keybert()
+        with encode_lock:   # the tokenizer isn't thread-safe; see embed_model
+            results = kbert.extract_keywords(
+                text,
+                keyphrase_ngram_range=(1, 2),
+                stop_words="english",
+                top_n=top_n,
+                use_mmr=True,
+                diversity=0.5,
+            )
         return [kw for kw, _ in results]
     except Exception as e:
         log.warning(f"KeyBERT failed: {e}")
@@ -207,7 +233,7 @@ def _extract_keywords(text, top_n=8):
 def _analyze_sentiment(text):
     if not text:
         return 0.0, "neutral"
-    compound = _vader.polarity_scores(text[:1000])["compound"]
+    compound = _get_vader().polarity_scores(text[:1000])["compound"]
     label    = "positive" if compound >= 0.05 else ("negative" if compound <= -0.05 else "neutral")
     return round(compound, 4), label
 
@@ -229,13 +255,20 @@ def analyze_article(article):
         article["read_angle"]  = ""
         article["impact"]      = ""   # keep for DB compatibility
     else:
-        summary, read_angle    = _summarize_and_angle(title, body, article.get("published", ""))
+        summary, read_angle    = _summarize_and_angle(
+            title, body, article.get("published", ""), article.get("published_estimated", False)
+        )
         article["summary"]     = summary
         article["read_angle"]  = read_angle
         article["impact"]      = read_angle   # keep for DB compatibility
 
     article["keywords"]        = _extract_keywords(combined)
-    article["sentiment"], article["sentiment_label"] = _analyze_sentiment(combined)
+    if language == "en":
+        article["sentiment"], article["sentiment_label"] = _analyze_sentiment(combined)
+    else:
+        # VADER only reads English: on other text it returns 0.0, which would
+        # show as a confident "neutral". None means "not measured".
+        article["sentiment"], article["sentiment_label"] = 0.0, None
     return article
 
 
@@ -249,18 +282,18 @@ def _fallback_analysis(article):
     article["impact"]          = ""
     article["keywords"]        = article.get("keywords") or []
     article["sentiment"]       = article.get("sentiment") or 0.0
-    article["sentiment_label"] = article.get("sentiment_label") or "neutral"
+    article["sentiment_label"] = article.get("sentiment_label")   # None: not measured
     return article
 
 
 def analyze_all(articles, max_workers=3):
     log.info(f"Analyzing {len(articles)} articles...")
 
+    reset_breaker()   # every run starts with a closed breaker, whatever the provider
     # Load the model once, serially, before the pool starts — otherwise every
     # worker races on the same cold load and they all hit the timeout together.
     if config.settings()["llm"].get("provider", "ollama") == "ollama":
-        from .ollama_client import reset_breaker, warm_up
-        reset_breaker()
+        from .ollama_client import warm_up
         warm_up()
 
     results = [None] * len(articles)

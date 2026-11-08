@@ -367,7 +367,8 @@ def test_analysis(articles):
     try:
         from keybert import KeyBERT
         info("Loading KeyBERT (may take ~10s first time)…")
-        kb = KeyBERT(model="all-MiniLM-L6-v2")
+        from agent.embed_model import get_model
+        kb = KeyBERT(model=get_model())   # the pinned model the pipeline uses
         sample_text = articles[0]["title"] + ". " + articles[0]["body"]
         kws = kb.extract_keywords(sample_text, top_n=5)
         ok(f"KeyBERT keywords: {[k for k,_ in kws]}")

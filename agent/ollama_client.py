@@ -100,13 +100,12 @@ def warm_up() -> bool:
         return False
 
 
-# ── Concurrency gate + circuit breaker ───────────────────────
+# ── Concurrency gate ─────────────────────────────────────────
 # Shared by every caller (analyzer workers and fusion) for the whole run.
+# The circuit breaker covers every provider, so it lives in llm.py.
 
-_slot_lock    = threading.Lock()
-_slots        = None
-_breaker_lock = threading.Lock()
-_breaker      = {"failures": 0, "open": False}
+_slot_lock = threading.Lock()
+_slots     = None
 
 
 def slot() -> threading.BoundedSemaphore:
@@ -127,36 +126,8 @@ def slot() -> threading.BoundedSemaphore:
         return _slots
 
 
-def breaker_open() -> bool:
-    """True once Ollama has failed `failure_threshold` calls in a row.
-
-    Callers then return "" immediately and fall back to extractive output.
-    A wedged Ollama no longer costs a full timeout on every remaining article.
-    """
-    with _breaker_lock:
-        return _breaker["open"]
-
-
-def record_result(ok: bool) -> None:
-    """Feed the breaker the outcome of one generate call (after retries)."""
-    threshold = max(1, int(config.settings()["llm"]["ollama"].get("failure_threshold", 3)))
-    with _breaker_lock:
-        if ok:
-            _breaker["failures"] = 0
-            return
-        _breaker["failures"] += 1
-        if not _breaker["open"] and _breaker["failures"] >= threshold:
-            _breaker["open"] = True
-            log.warning(
-                f"Ollama failed {threshold} calls in a row — treating it as "
-                "unresponsive; extractive fallbacks for the rest of the run"
-            )
-
-
-def reset_breaker() -> None:
-    """Start a run with a closed breaker and a freshly sized gate."""
+def reset_slots() -> None:
+    """Size the gate afresh from settings at the start of a run."""
     global _slots
-    with _breaker_lock:
-        _breaker.update(failures=0, open=False)
     with _slot_lock:
         _slots = None

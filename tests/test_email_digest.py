@@ -92,8 +92,8 @@ class FakeSMTP:
     def ehlo(self):
         pass
 
-    def starttls(self):
-        pass
+    def starttls(self, context=None):
+        self.tls_context = context
 
     def login(self, user, password):
         if self.step and self.step[0] == "login":
@@ -146,6 +146,14 @@ def test_explicit_421_at_data_is_retried(fake_smtp, sleeps):
     assert [c.sent for c in fake_smtp.connections] == [False, True]
 
 
+def test_starttls_verifies_the_server_certificate(fake_smtp, sleeps):
+    import ssl
+
+    email_digest._send_smtp("<html/>", "subject")
+    ctx = fake_smtp.connections[0].tls_context
+    assert ctx is not None and ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+
+
 def test_quit_timeout_after_delivery_is_ignored(fake_smtp, sleeps):
     email_digest._send_smtp("<html/>", "subject")
     assert fake_smtp.connections[0].sent and fake_smtp.connections[0].timeout == 120
@@ -185,3 +193,65 @@ def test_sendgrid_timeout_is_delivery_unknown_and_client_has_a_timeout(monkeypat
     with pytest.raises(email_digest.DeliveryUnknown):
         email_digest._send_sendgrid("<html/>", "subject")
     assert seen["timeout"] == 45
+
+
+# ── SendGrid: what happens after the request is sent ─────────
+
+def _fake_sendgrid(monkeypatch, error):
+    """Install a stand-in sendgrid package whose send() raises `error`."""
+    import sys
+    import types
+
+    calls = []
+
+    class Client:
+        timeout = None
+
+    class SendGridAPIClient:
+        def __init__(self, api_key):
+            self.client = Client()
+
+        def send(self, mail):
+            calls.append(mail)
+            raise error
+
+    sg = types.ModuleType("sendgrid")
+    sg.SendGridAPIClient = SendGridAPIClient
+    helpers = types.ModuleType("sendgrid.helpers")
+    mail_mod = types.ModuleType("sendgrid.helpers.mail")
+    mail_mod.Mail = lambda **kw: kw
+    for name, mod in (("sendgrid", sg), ("sendgrid.helpers", helpers), ("sendgrid.helpers.mail", mail_mod)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    settings = {"email": {"sendgrid": {"api_key": "k"}, "from_address": "a@example.com",
+                          "to_addresses": ["b@example.com"]}}
+    monkeypatch.setattr(email_digest.config, "settings", lambda: settings)
+    return calls
+
+
+@pytest.mark.parametrize("error", [
+    __import__("http.client").client.RemoteDisconnected("Remote end closed connection without response"),
+    ConnectionResetError("reset by peer"),
+    _StatusError(502),
+    _StatusError(504),
+])
+def test_sendgrid_failure_after_sending_is_delivery_unknown_and_not_retried(monkeypatch, sleeps, error):
+    calls = _fake_sendgrid(monkeypatch, error)
+    with pytest.raises(email_digest.DeliveryUnknown):
+        _send_with_retry(email_digest._send_sendgrid, "<html/>", "subject")
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_sendgrid_503_is_retried(monkeypatch, sleeps):
+    calls = _fake_sendgrid(monkeypatch, _StatusError(503))
+    with pytest.raises(_StatusError):
+        _send_with_retry(email_digest._send_sendgrid, "<html/>", "subject")
+    assert len(calls) == 3 and sleeps == [30, 120]
+
+
+def test_sendgrid_refused_connection_is_retried(monkeypatch, sleeps):
+    import urllib.error
+
+    calls = _fake_sendgrid(monkeypatch, urllib.error.URLError(ConnectionRefusedError("refused")))
+    with pytest.raises(urllib.error.URLError):
+        _send_with_retry(email_digest._send_sendgrid, "<html/>", "subject")
+    assert len(calls) == 3

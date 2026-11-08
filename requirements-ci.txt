@@ -1,0 +1,12 @@
+# What the CI test job needs. The offline tests only touch light modules
+# (preprocessor, scorer, config, text, llm, net, collector enrichment, the
+# outputs), so torch and transformers stay out. CI installs the hashed
+# requirements-ci.lock made from this file by tools/make_lock.py.
+ruff==0.17.3
+pytest
+pyyaml
+httpx
+jinja2
+ollama
+feedparser
+trafilatura

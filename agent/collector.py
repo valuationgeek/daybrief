@@ -8,6 +8,7 @@ Three sections:
 """
 
 import hashlib
+import html
 import logging
 import re
 import threading
@@ -20,7 +21,10 @@ import httpx
 import trafilatura
 
 from . import config, db
-from .net import TRANSIENT_ERRORS, with_retry, resolve_timeout
+from .net import (
+    MAX_FEED_BYTES, MAX_PAGE_BYTES, TRANSIENT_ERRORS, FetchRefused,
+    resolve_timeout, safe_get, with_retry,
+)
 
 log = logging.getLogger("daybrief.collector")
 
@@ -54,6 +58,41 @@ def _make_id(url):
     return hashlib.sha256(url.encode()).hexdigest()[:16]
 
 
+def _strip_html(text):
+    """Plain text from an RSS summary trafilatura couldn't extract anything from.
+
+    Unescapes first, then strips tags: the other order turns an escaped
+    "&lt;iframe src=…&gt;" back into a live tag after the strip has run. A tag
+    must start with a letter, "/" or "!" right after "<", so a literal
+    comparison ("Profit < 5% while revenue > 10%") isn't mistaken for one.
+    """
+    return re.sub(r"<[A-Za-z/!][^>]*>", " ", html.unescape(text or "")).strip()
+
+
+def _rss_body(raw_summary):
+    """An entry's body from its RSS summary.
+
+    Only a summary with markup goes to trafilatura: on plain text it finds no
+    HTML tree and logs three ERROR lines per entry, which buried real errors.
+    """
+    extracted = trafilatura.extract(raw_summary) if "<" in raw_summary else None
+    return extracted or _strip_html(raw_summary)[:500]
+
+
+def _is_html(content_type):
+    return not content_type or "html" in content_type.lower()
+
+
+_CHARSET_RE = re.compile(r"charset\s*=\s*[\"']?([A-Za-z0-9._:-]+)", re.IGNORECASE)
+
+
+def _feed_content_type(server_type):
+    """What feedparser is told the feed's Content-Type is: application/xml,
+    plus the server's charset when it states one (see _fetch_all_rss)."""
+    m = _CHARSET_RE.search(server_type or "")
+    return f"application/xml; charset={m.group(1)}" if m else "application/xml"
+
+
 def _is_recent(date_str, max_age_hours):
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
@@ -66,6 +105,7 @@ def _is_recent(date_str, max_age_hours):
 
 
 def _rss_date(entry):
+    """The entry's publication time in ISO format, or None if it has none."""
     for attr in ("published_parsed", "updated_parsed", "created_parsed"):
         t = getattr(entry, attr, None)
         if t:
@@ -73,10 +113,10 @@ def _rss_date(entry):
                 return datetime(*t[:6], tzinfo=timezone.utc).isoformat()
             except Exception:
                 pass
-    return datetime.utcnow().isoformat()
+    return None
 
 
-def _fetch_body(url, timeout=None):
+def _fetch_body(url, timeout=None, client=None):
     """Fetch and extract an article's full text.
 
     Returns (text, network_ok). `text` is "" on any miss. `network_ok` is
@@ -86,24 +126,30 @@ def _fetch_body(url, timeout=None):
     network_ok stays True. One paywalled source must not switch enrichment
     off for every other site.
 
-    Downloaded with httpx rather than trafilatura.fetch_url. fetch_url
+    Downloaded with net.safe_get rather than trafilatura.fetch_url. fetch_url
     catches every exception and returns None, so a with_retry around it
-    never fired, and an outage looked exactly like a paywall.
+    never fired, and an outage looked exactly like a paywall. safe_get also
+    refuses links (and redirects) to private or local addresses, and caps
+    the size, because the feed, not us, chooses this URL. A non-HTML page
+    is dropped once its headers arrive, before its body downloads.
     """
     timeout = resolve_timeout(timeout)
     if not url or not url.lower().startswith(("http://", "https://")):
         return "", True
     try:
         resp = with_retry(
-            lambda: httpx.get(
+            lambda: safe_get(
                 url,
                 headers={"User-Agent": _BROWSER_UA},
                 timeout=timeout,
-                follow_redirects=True,
+                max_bytes=MAX_PAGE_BYTES,
+                accept=_is_html,
+                client=client,
             ),
             what=f"body fetch {url}",
         )
-    except httpx.UnsupportedProtocol:
+    except (httpx.UnsupportedProtocol, httpx.InvalidURL, FetchRefused) as e:
+        log.debug(f"Body fetch refused for {url}: {e}")
         return "", True
     except TRANSIENT_ERRORS as e:
         log.debug(f"Body fetch failed for {url}: {e}")
@@ -113,7 +159,7 @@ def _fetch_body(url, timeout=None):
         return "", True
 
     ctype = resp.headers.get("content-type", "").lower()
-    if resp.status_code >= 400 or (ctype and "html" not in ctype):
+    if resp.status_code >= 400 or not _is_html(ctype):
         log.debug(f"Body fetch {url}: HTTP {resp.status_code} {ctype or '?'} — page-level miss")
         return "", True
     try:
@@ -138,7 +184,9 @@ def _usable_body(new, old, title):
     """
     if not new or len(new) <= len(old or ""):
         return False
-    if _BLOCK_PAGE_RE.search(new[:600]):
+    # Interstitials are short. A long page, or a story whose own headline is
+    # about cookies or privacy settings, may open with those words for real.
+    if len(new) < 3000 and not _BLOCK_PAGE_RE.search(title or "") and _BLOCK_PAGE_RE.search(new[:600]):
         return False
     words = {w.lower() for w in _TITLE_WORD_RE.findall(title or "")}
     if len(words) >= 2:
@@ -159,8 +207,9 @@ def _enrich_bodies(articles):
     high means most RSS-only bodies get re-fetched, so the fetches have to be
     cheap:
 
-    - non-English articles are skipped (their summary only ever uses ~300
-      chars of body, and they bypass the LLM);
+    - non-English articles are fetched only when their body is nearly empty
+      (limits.enrich_non_english_below_chars): their summary only ever uses
+      ~300 chars of body, and they bypass the LLM;
     - each URL is fetched once, even if several feeds carry it;
     - fetches run in a small thread pool (limits.enrich_workers);
     - once a host fails at the network level, its remaining URLs are
@@ -173,9 +222,14 @@ def _enrich_bodies(articles):
     """
     limits    = config.feeds().get("limits", {}) or {}
     threshold = limits.get("enrich_below_chars", 9000)
+    # Non-English summaries only use ~300 chars of body and skip the LLM, so
+    # a long page buys nothing. A title-only entry (empty <description>) is
+    # still rescued, or the preprocessor drops it as too short.
+    other_threshold = limits.get("enrich_non_english_below_chars", 300)
     by_url    = {}
     for a in articles:
-        if a.get("language", "en") != "en" or len(a.get("body") or "") >= threshold:
+        limit = threshold if a.get("language", "en") == "en" else other_threshold
+        if len(a.get("body") or "") >= limit:
             continue
         by_url.setdefault(a["url"], []).append(a)
     if not by_url:
@@ -194,11 +248,21 @@ def _enrich_bodies(articles):
     state      = {"streak": 0, "stopped": False}
 
     def work(url):
-        host = urlparse(url).netloc.lower()
+        try:
+            host = urlparse(url).netloc.lower()
+        except ValueError:
+            # "http://[2001:db8::1/story": one bad link is a page-level miss,
+            # never an exception out of fut.result() that aborts Stage 1.
+            log.debug(f"Skipping malformed URL: {url}")
+            return url, ("", True)
         with lock:
             if state["stopped"] or host in down_hosts:
                 return url, None   # skipped — breaker open or host unreachable
-        text, network_ok = _fetch_body(url, timeout)
+        try:
+            text, network_ok = _fetch_body(url, timeout, client)
+        except Exception as e:   # _fetch_body handles its own errors; this is a backstop
+            log.debug(f"Body fetch crashed for {url}: {e}")
+            text, network_ok = "", True
         # Breaker state is updated here in the worker, not in the result loop
         # below: by the time a result is consumed, the worker may already be
         # running the next queued URLs, which must see the updated state.
@@ -217,7 +281,9 @@ def _enrich_bodies(articles):
         return url, (text, network_ok)
 
     replaced = rejected = misses = 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    # One client for the pool: keep-alive connections are reused across
+    # articles from the same site instead of a new TLS handshake per page.
+    with httpx.Client(follow_redirects=False) as client, ThreadPoolExecutor(max_workers=workers) as pool:
         for fut in as_completed([pool.submit(work, url) for url in by_url]):
             url, result = fut.result()
             if result is None or not result[1]:
@@ -242,14 +308,22 @@ def _enrich_bodies(articles):
 
 
 def _blank_article(title, url, source, category, published, body="", credibility=0.80):
-    """Standard article dict. All downstream stages expect exactly this shape."""
+    """Standard article dict. All downstream stages expect exactly this shape.
+
+    A missing `published` is filled with the fetch time so sorting and
+    recency still work, and `published_estimated` says so: the analyzer must
+    never tell the LLM that the fetch time is when the article came out.
+    """
+    estimated = not published
     return {
         "id":              _make_id(url),
         "title":           title.strip(),
         "url":             url,
         "source":          source,
         "category":        category,
-        "published":       published,
+        "published":       published or datetime.utcnow().isoformat(),
+        "published_estimated": estimated,
+        "language":        "en",
         "fetched_at":      datetime.utcnow().isoformat(),
         "body":            body,
         "credibility":     credibility,
@@ -298,26 +372,28 @@ def _fetch_all_rss():
                 # falls back to urllib's default of "block forever", which can
                 # wedge the whole run if the network drops mid-fetch.
                 resp = with_retry(
-                    lambda: httpx.get(
+                    lambda: safe_get(
                         url,
                         headers={"User-Agent": ua},
                         timeout=feed_timeout,
-                        follow_redirects=True,
+                        max_bytes=MAX_FEED_BYTES,
                     ).raise_for_status(),
                     what=f"[RSS] {source}",
                 )
                 # content-location lets feedparser resolve relative entry links.
-                # The server's Content-Type is deliberately NOT forwarded: per
-                # RFC 3023 its charset overrides the XML declaration, and servers
-                # like RTHK send bare "text/xml" (= us-ascii) for UTF-8 feeds,
-                # which marks them bozo. A fixed charset-less application/xml
-                # defers to the XML's own encoding declaration; omitting the
-                # header entirely would mark every feed bozo ("no Content-type").
+                # Per RFC 3023 a Content-Type charset overrides the XML
+                # declaration, and a bare "text/xml" means us-ascii. Servers like
+                # RTHK send bare "text/xml" for UTF-8 feeds, which marks them
+                # bozo, so a type without a charset becomes a charset-less
+                # application/xml that defers to the XML's own declaration.
+                # A charset the server does state is kept: a GBK or Big5 feed
+                # whose XML declaration names no encoding depends on it.
+                # Omitting the header entirely would mark every feed bozo.
                 parsed = feedparser.parse(
                     resp.content,
                     response_headers={
                         "content-location": str(resp.url),
-                        "content-type":     "application/xml",
+                        "content-type":     _feed_content_type(resp.headers.get("content-type", "")),
                     },
                 )
 
@@ -338,8 +414,7 @@ def _fetch_all_rss():
                         continue
                     if db.article_exists(link):
                         continue
-                    raw_summary = getattr(entry, "summary", "") or ""
-                    body    = trafilatura.extract(raw_summary) or raw_summary[:500]
+                    body    = _rss_body(getattr(entry, "summary", "") or "")
                     article = _blank_article(title, link, source, cat_key, pub, body, credibility)
                     article["language"] = language
                     articles.append(article)
@@ -392,7 +467,7 @@ def _fetch_nytimes():
                 title = item.get("title", "").strip()
                 if not link or not title or db.article_exists(link):
                     continue
-                pub  = item.get("published_date", datetime.utcnow().date().isoformat())
+                pub  = item.get("published_date") or None
                 body = item.get("abstract", "") or ""
                 articles.append(_blank_article(title, link, "NYT Most Emailed", emailed_cat, pub, body, 0.95))
                 count += 1
@@ -417,7 +492,7 @@ def _fetch_nytimes():
                 title = item.get("title", "").strip()
                 if not link or not title or db.article_exists(link):
                     continue
-                pub  = (item.get("published_date") or datetime.utcnow().isoformat())[:10]
+                pub  = (item.get("published_date") or "")[:10] or None
                 body = item.get("abstract", "") or ""
                 articles.append(_blank_article(title, link, "NYT World", world_cat, pub, body, 0.95))
                 count += 1
@@ -481,7 +556,7 @@ def _fetch_newsdata():
             title = (item.get("title") or "").strip()
             if not link or not title or db.article_exists(link):
                 continue
-            pub  = item.get("pubDate", datetime.utcnow().isoformat())
+            pub  = item.get("pubDate") or None
             # Use full content if available, fall back to description
             body = item.get("full_description") or item.get("description") or item.get("content") or ""
             src  = item.get("source_id") or item.get("source_name") or "NewsData"

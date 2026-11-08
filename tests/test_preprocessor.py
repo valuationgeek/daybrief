@@ -87,3 +87,37 @@ def test_invisible_characters_are_removed():
     cleaned = process([_article(body=body)])[0]["body"]
     assert cleaned.startswith("The Federal Reserve raised rates by 25 basis points")
     assert not any(ch in cleaned for ch in "\u200b\ufeff\x07\u00a0")
+
+
+def _clean(text):
+    from agent.preprocessor import _clean_text
+    return _clean_text(text)
+
+
+def test_phrase_inside_a_sentence_is_not_boilerplate():
+    body = ("Meta changed its terms of service to let it train AI on public posts, and regulators "
+            "in Europe said they would review the change before it takes effect next year.")
+    assert _clean(body) == body
+
+
+def test_short_boilerplate_tail_and_lines_are_removed():
+    body = ("The Fed held rates steady on Wednesday. Read more: https://example.com/fed\n"
+            "Advertisement\n"
+            "Officials signalled two cuts later this year.\n"
+            "© 2026 Example News. All rights reserved.")
+    cleaned = _clean(body)
+    assert "Read more" not in cleaned and "Advertisement" not in cleaned and "rights reserved" not in cleaned
+    assert "The Fed held rates steady on Wednesday." in cleaned
+    assert "Officials signalled two cuts later this year." in cleaned
+
+
+def test_advertisement_inside_prose_is_kept():
+    body = "The advertisement market grew 8% as brands returned to television this quarter."
+    assert _clean(body) == body
+
+
+def test_zero_width_joiners_are_kept():
+    persian = "می‌خواهم"          # ZWNJ inside a Persian word
+    family = "\U0001F468‍\U0001F469‍\U0001F467"   # ZWJ emoji sequence
+    cleaned = _clean(f"{persian} {family} ​visible")
+    assert "‌" in cleaned and "‍" in cleaned and "​" not in cleaned

@@ -81,3 +81,77 @@ def test_example_configs_are_valid_yaml():
     ):
         data = yaml.safe_load((root / name).read_text(encoding="utf-8"))
         assert isinstance(data, dict), f"{name} did not parse to a mapping"
+
+
+# ── Secret redaction ─────────────────────────────────────────
+
+@pytest.fixture
+def secrets(monkeypatch):
+    remembered = set()
+    monkeypatch.setattr(config, "_secret_values", remembered)
+    return remembered
+
+
+@pytest.mark.parametrize("line, leaked", [
+    ("GET https://api.nytimes.com/svc/topstories/v2/world.json?api-key=Nyt5ecretValue", "Nyt5ecretValue"),
+    ("GET https://newsdata.io/api/1/market?language=en&apikey=pub_9f8e7d6c5b", "pub_9f8e7d6c5b"),
+    ("POST https://api.telegram.org/bot123456:AAF-secret_part/sendMessage", "AAF-secret_part"),
+    # Short and obviously fake: redaction needs 8+ characters, and nothing in
+    # the repo should look like a real token to the secret-scanning hook.
+    ("Authorization: Bearer FAKE-TOKEN-123", "FAKE-TOKEN-123"),
+    ("{'api_key': 'sk-proj-abcdef123456'}", "sk-proj-abcdef123456"),
+])
+def test_redact_masks_secrets_in_urls_headers_and_dumps(secrets, line, leaked):
+    out = config.redact(line)
+    assert leaked not in out and "***" in out
+
+
+def test_redact_masks_every_loaded_secret_wherever_it_appears(secrets, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-1234567890")
+    monkeypatch.setenv("DAYBRIEF_SMTP_PASSWORD", "abcd efgh ijkl mnop")
+    config._expand_env({"llm": {"openai": {"api_key": "${OPENAI_API_KEY:-}"}},
+                        "email": {"smtp": {"password": "${DAYBRIEF_SMTP_PASSWORD:-}"}}})
+    out = config.redact("auth failed for sk-test-1234567890 using 'abcd efgh ijkl mnop'")
+    assert "sk-test-1234567890" not in out and "abcd efgh ijkl mnop" not in out
+
+
+def test_redact_leaves_watchlist_terms_and_placeholders_alone(secrets, monkeypatch):
+    # A variable name no real .env sets, so the placeholder default is what expands.
+    monkeypatch.delenv("DAYBRIEF_TEST_UNSET_KEY", raising=False)
+    config._expand_env({"keywords": ["semiconductor tariffs"], "author": "Jane Reporter",
+                        "key": "${DAYBRIEF_TEST_UNSET_KEY:-YOUR_NYT_API_KEY}"})
+    remembered = len(secrets)   # a count, so a failure never prints a value
+    assert remembered == 0
+    assert config.redact("semiconductor tariffs by Jane Reporter") == "semiconductor tariffs by Jane Reporter"
+
+
+def test_logged_lines_and_tracebacks_are_redacted(secrets):
+    import io
+    import logging
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(config._RedactingFormatter("%(name)s %(message)s"))
+    logger = logging.getLogger("httpx.test_redaction")
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        logger.warning("HTTP Request: GET https://api.nytimes.com/x.json?api-key=Nyt5ecretValue")
+        try:
+            raise RuntimeError("401 for url https://newsdata.io/api/1/market?apikey=pub_9f8e7d6c5b")
+        except RuntimeError:
+            logger.exception("request failed")
+    finally:
+        logger.removeHandler(handler)
+    text = stream.getvalue()
+    assert "Nyt5ecretValue" not in text and "pub_9f8e7d6c5b" not in text
+    assert text.count("***") >= 2
+
+
+
+def test_validate_warns_when_the_old_60s_ollama_timeout_is_still_set(monkeypatch):
+    _patch(monkeypatch, GOOD_FEEDS, GOOD_SOURCES)
+    monkeypatch.setattr(config, "settings", lambda: {"llm": {"provider": "ollama", "ollama": {"timeout": 60}}})
+    assert any("llm.ollama.timeout is 60s" in w for w in config.validate())
+    monkeypatch.setattr(config, "settings", lambda: {"llm": {"provider": "ollama", "ollama": {"timeout": 180}}})
+    assert config.validate() == []

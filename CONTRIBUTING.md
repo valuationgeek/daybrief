@@ -8,10 +8,19 @@ Thanks for considering a contribution! This is a small, focused project — the 
 git clone https://github.com/YOURNAME/daybrief
 cd daybrief
 bash setup.sh          # or setup.bat on Windows
-pip install ruff pytest
+pip install ruff==0.17.3 pytest
 ```
 
 The setup script copies `config/*.example.yaml` to your personal (gitignored) `settings.yaml` / `watchlist.yaml`. You don't need any API keys for development — RSS feeds and the local Ollama path work without them.
+
+## Dependencies
+
+- **Local setup** installs `requirements.txt`, which has version ranges. daybrief runs on Linux, macOS and Windows with Python 3.10+, and a hashed lock fits only one platform and one Python version.
+- **The GitHub workflows** install exact versions with sha256 hashes, wheels only:
+  - `requirements-ci.lock`, from `requirements-ci.txt`, for the test job on Linux and Windows with Python 3.11;
+  - `requirements.lock`, from `requirements.txt`, for `digest.yml` on Linux with Python 3.11. That job runs with your secrets.
+- **To change a dependency,** edit the `.txt` file, run `python tools/make_lock.py` (pip 23.1+), and commit the `.txt` and `.lock` files together. The script installs nothing. It refuses to write a lock if OSV lists an advisory for any pin, and only the repository owner accepts one, with `--accept`.
+- **GitHub Actions** are pinned to commit SHAs. Dependabot proposes updates.
 
 ## Checks
 

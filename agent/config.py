@@ -12,14 +12,51 @@ import re
 import yaml
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 # ${VAR} or ${VAR:-default}  — default is used when VAR is unset/empty
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+
+# NYT and NewsData take their keys as URL parameters, and Telegram puts the bot
+# token in the URL path, so any logged URL or HTTP error can carry a secret.
+# `&amp;` covers a URL that was HTML-escaped before it reached the log.
+_SECRET_NAME = r"(?:api[-_]?key|access[-_]?token|auth[-_]?token|token|key|secret|password|passwd|pwd)"
+_SECRET_URL_PARAM_RE = re.compile(
+    rf"((?:[?&]|&amp;){_SECRET_NAME}=)[^&\s\"'<>)]+", re.IGNORECASE
+)
+# 'apikey': 'X', "token": "X", api_key=X in a repr or dict dump. The name must
+# be the whole key, so "keywords: x" or "monkey = y" are left alone.
+_SECRET_PAIR_RE = re.compile(
+    rf"""(?<![\w-])(["']?{_SECRET_NAME}["']?\s*[:=]\s*["']?)(?!\*\*\*)[^"'\s,&)}}\]]{{6,}}""",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"(\b(?:Bearer|Basic|Token)\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+_BOT_TOKEN_RE = re.compile(r"(/bot\d+:)[\w-]+")
+_SECRET_MIN_LENGTH = 8   # shorter values could mask ordinary words in a log line
+_secret_values = set()   # every secret value this process has loaded
+
+# A variable or config key holds a secret when its name ENDS in one of these
+# words: NYT_API_KEY, api_key, password, bot_token. Matching anywhere in the
+# name would also catch "keywords" or "author" and mask watchlist terms.
+_SECRET_KEY_RE = re.compile(
+    r"(?:^|[_-])(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|pass|credentials?|auth)$",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_RE = re.compile(r"^(?:YOUR_|CHANGE_?ME|<)|\$\{", re.IGNORECASE)
+
+
+def _remember_secret(value) -> None:
+    """Mask this value in every later log line, stored error and traceback."""
+    if isinstance(value, str):
+        value = value.strip()
+        if len(value) >= _SECRET_MIN_LENGTH and not _PLACEHOLDER_RE.search(value):
+            _secret_values.add(value)
 
 
 def _load_dotenv():
@@ -39,22 +76,47 @@ def _load_dotenv():
         key = key.strip()
         val = val.strip().strip('"').strip("'")
         os.environ.setdefault(key, val)
+        if _SECRET_KEY_RE.search(key):
+            _remember_secret(val)
+            _remember_secret(os.environ[key])
 
 
-def _expand_env(value):
-    """Recursively replace ${VAR} / ${VAR:-default} in strings within a config."""
+def redact(text) -> str:
+    """Mask API keys and tokens in text that is about to be logged or stored."""
+    text = str(text)
+    for secret in sorted(_secret_values, key=len, reverse=True):
+        text = text.replace(secret, "***")
+    text = _SECRET_URL_PARAM_RE.sub(r"\1***", text)
+    text = _SECRET_PAIR_RE.sub(r"\1***", text)
+    text = _BEARER_RE.sub(r"\1***", text)
+    text = _BOT_TOKEN_RE.sub(r"\1***", text)
+    return text
+
+
+def _expand_env(value, key=""):
+    """Recursively replace ${VAR} / ${VAR:-default} in strings within a config.
+
+    Also records secrets wherever they come from: a substituted variable with a
+    secret-looking name, whether it was set in .env, the OS or a scheduler, and
+    any value, literal or substituted, under a secret-looking config key.
+    """
     if isinstance(value, str):
         def repl(m):
             var, default = m.group(1), m.group(2)
             env_val = os.environ.get(var)
             if env_val:
+                if _SECRET_KEY_RE.search(var):
+                    _remember_secret(env_val)
                 return env_val
             return default if default is not None else m.group(0)
-        return _ENV_RE.sub(repl, value)
+        expanded = _ENV_RE.sub(repl, value)
+        if key and _SECRET_KEY_RE.search(key):
+            _remember_secret(expanded)
+        return expanded
     if isinstance(value, dict):
-        return {k: _expand_env(v) for k, v in value.items()}
+        return {k: _expand_env(v, str(k)) for k, v in value.items()}
     if isinstance(value, list):
-        return [_expand_env(v) for v in value]
+        return [_expand_env(v, key) for v in value]
     return value
 
 
@@ -102,6 +164,19 @@ def settings() -> dict:
     return load("settings")
 
 
+def local_now() -> datetime:
+    """Now in settings.yaml → agent.timezone (UTC if unset or unknown).
+
+    Every output dates the digest with this, so the email subject, the
+    Obsidian note and the Telegram header agree on the day.
+    """
+    try:
+        tz = ZoneInfo(settings()["agent"].get("timezone") or "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz)
+
+
 def validate() -> list:
     """Cross-check category keys and scoring weights across the config files.
 
@@ -140,9 +215,34 @@ def validate() -> list:
             f"expected 1.0 — scores will be skewed"
         )
 
+    try:
+        llm_cfg = settings().get("llm", {})
+    except Exception:
+        llm_cfg = {}   # no settings.yaml yet; load() reports that on its own
+    ollama_timeout = (llm_cfg.get("ollama") or {}).get("timeout")
+    if llm_cfg.get("provider", "ollama") == "ollama" and isinstance(ollama_timeout, (int, float)) \
+            and ollama_timeout < 120:
+        warnings.append(
+            f"settings.yaml: llm.ollama.timeout is {ollama_timeout}s. Older example configs shipped 60, "
+            f"which used to be ignored and is now enforced per call — 180 is the default; a long "
+            f"article on a CPU-only model can take more than 60s"
+        )
+
     for w in warnings:
         log.warning(f"Config check: {w}")
     return warnings
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Redacts the finished line, so arguments and tracebacks are covered too.
+
+    On a handler rather than a logging.Filter: logger filters don't run for
+    records propagated from child loggers such as httpx, and a filter on the
+    message wouldn't see the traceback text the formatter appends.
+    """
+
+    def format(self, record):
+        return redact(super().format(record))
 
 
 def setup_logging():
@@ -157,5 +257,37 @@ def setup_logging():
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(str(log_file), encoding="utf-8"),
     ]
-    logging.basicConfig(level=level, format=fmt, handlers=handlers)
+    formatter = _RedactingFormatter(fmt)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=level, handlers=handlers)
+    # At INFO, httpx logs every request's full URL, and the NYT and NewsData
+    # keys are URL parameters.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    _install_redacting_excepthooks()
     return logging.getLogger("daybrief")
+
+
+def _install_redacting_excepthooks():
+    """Mask secrets in tracebacks printed outside logging.
+
+    An exception that escapes main.py is printed by sys.excepthook straight to
+    the console (and the scheduler's captured output), bypassing the log
+    formatter.
+    """
+    import threading
+    import traceback
+
+    def hook(exc_type, exc, tb):
+        sys.stderr.write(redact("".join(traceback.format_exception(exc_type, exc, tb))))
+
+    def thread_hook(args):
+        if args.exc_type is SystemExit:
+            return
+        name = getattr(args.thread, "name", "thread")
+        text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        sys.stderr.write(redact(f"Exception in thread {name}:\n{text}"))
+
+    sys.excepthook = hook
+    threading.excepthook = thread_hook

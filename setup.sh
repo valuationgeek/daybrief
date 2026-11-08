@@ -40,7 +40,7 @@ python3 -c "from agent.db import init_db; init_db(); print('  DB initialised.')"
 
 # 5. Download sentence-transformer model (used for embeddings + KeyBERT)
 echo "→ Pre-downloading sentence-transformer model (all-MiniLM-L6-v2, ~90 MB)..."
-python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2'); print('  Model ready.')"
+python3 -m agent.embed_model   # the pinned revision in agent/embed_model.py
 
 # 6. Check Ollama
 echo ""

@@ -6,30 +6,22 @@ Fix #9:  total_articles = only articles actually shown (not total fetched)
 Fix #10: send() is guarded by a run-level flag so it fires exactly once
 """
 
+import http.client
 import smtplib
 import logging
+import ssl
 import time
 import urllib.error
-from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from jinja2 import Environment, FileSystemLoader
 
 from .. import config
+from . import labels, safe_text
 
 log = logging.getLogger("daybrief.email")
-
-
-def _local_now():
-    tz_str = config.settings()["agent"].get("timezone", "UTC")
-    try:
-        tz = ZoneInfo(tz_str)
-    except Exception:
-        tz = ZoneInfo("UTC")
-    return datetime.now(tz)
 
 
 # Guard: set to True after first successful send this process run
@@ -44,10 +36,6 @@ def _flag_emoji(flags):
     if "CRISIS" in flags:
         return "⚠️"
     return "🟢"
-
-
-def _sentiment_class(label):
-    return {"positive": "pos", "negative": "neg", "neutral": "neu"}.get(label or "neutral", "neu")
 
 
 def _build_html(articles, clusters, insights, trends, today, cfg_display):
@@ -95,13 +83,14 @@ def _build_html(articles, clusters, insights, trends, today, cfg_display):
         autoescape=True,
     )
     env.globals["flag_emoji"]      = _flag_emoji
-    env.globals["sentiment_class"] = _sentiment_class
+    env.globals["sentiment_class"] = labels.sentiment_class
     env.globals["zip"]             = zip
+    safe_text.register(env)   # safe_url: only http(s) links reach an href
 
     template = env.get_template("email.html.j2")
     return template.render(
         today          = today,
-        generated_at   = _local_now().strftime("%Y-%m-%d %I:%M %p %Z"),
+        generated_at   = config.local_now().strftime("%Y-%m-%d %I:%M %p %Z"),
         categories     = categories,
         insights       = insights,
         trends         = trends,
@@ -153,7 +142,9 @@ def _send_smtp(html_body, subject):
     server = smtplib.SMTP(smtp["host"], smtp["port"], timeout=timeout)
     try:
         server.ehlo()
-        server.starttls()
+        # Without a context, smtplib accepts any certificate, so anyone on the
+        # network path could pose as the server and collect the app password.
+        server.starttls(context=ssl.create_default_context())
         server.login(smtp["username"], smtp["password"])
         try:
             server.sendmail(from_addr, to_addrs, msg.as_string())
@@ -186,14 +177,24 @@ def _send_sendgrid(html_body, subject):
         subject      = subject,
         html_content = html_body,
     )
+    # urllib wraps only errors from *sending* the request in URLError, so a
+    # refused connection or a DNS failure is safe to retry. Anything raised
+    # while reading the reply (getresponse) comes through raw, after the POST
+    # was fully sent: SendGrid may have queued the mail, so resending could
+    # deliver it twice. A 502 or 504 from a gateway in front of SendGrid is
+    # just as ambiguous. 429, 500 and 503 are explicit refusals and retried.
     try:
         resp = sg.send(mail)
     except urllib.error.URLError as e:
         if isinstance(e.reason, TimeoutError):
             raise DeliveryUnknown(f"SendGrid request timed out — {_UNKNOWN_MSG}") from e
         raise   # refused / DNS failure — nothing was sent, safe to retry
-    except TimeoutError as e:   # response read timed out after the request went out
-        raise DeliveryUnknown(f"SendGrid response timed out — {_UNKNOWN_MSG}") from e
+    except (TimeoutError, ConnectionError, http.client.HTTPException) as e:
+        raise DeliveryUnknown(f"SendGrid connection lost after sending ({e!r}) — {_UNKNOWN_MSG}") from e
+    except Exception as e:
+        if getattr(e, "status_code", None) in (502, 504):
+            raise DeliveryUnknown(f"SendGrid gateway error {e.status_code} — {_UNKNOWN_MSG}") from e
+        raise
     log.info(f"SendGrid response: {resp.status_code}")
 
 
@@ -272,7 +273,7 @@ def send(articles, clusters, insights, trends):
         log.info(f"Only {len(articles)} articles — below minimum {min_items}, skipping email")
         return
 
-    today   = _local_now().date().isoformat()
+    today   = config.local_now().date().isoformat()
     subject = cfg.get("subject_template", "📰 News Digest — {date}").format(date=today)
 
     # Display limits (tunable in settings.yaml under email.display)

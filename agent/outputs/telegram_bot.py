@@ -10,9 +10,10 @@ or "[" made Telegram reject the whole message ("can't parse entities").
 import html
 import logging
 import asyncio
-from datetime import datetime
 
 from .. import config
+from .labels import sentiment_emoji
+from .safe_text import safe_url
 
 log = logging.getLogger("daybrief.telegram")
 
@@ -60,15 +61,16 @@ def _format_article(article: dict) -> str:
     source = _esc(article.get("source") or "?")
     score = article.get("score") or 0
     summary = _esc((article.get("summary") or "")[:200])
-    url = _esc(article.get("url"))
-    sentiment = article.get("sentiment_label") or "neutral"
-    sentiment_icon = {"positive": "😊", "negative": "😟", "neutral": "😐"}.get(sentiment, "😐")
+    url = _esc(safe_url(article.get("url")))   # only http(s) links
+    # No icon for a None label: it means "not measured", not neutral.
+    sentiment_icon = sentiment_emoji(article.get("sentiment_label"))
+    tone = f" · {sentiment_icon}" if sentiment_icon else ""
 
     return (
         f"{icon} <b>{title}</b>\n"
-        f"<i>{source}</i> · Score: {score:.2f} · {sentiment_icon}\n"
-        f"{summary}\n"
-        f'<a href="{url}">Read more</a>'
+        f"<i>{source}</i> · Score: {score:.2f}{tone}\n"
+        f"{summary}"
+        + (f'\n<a href="{url}">Read more</a>' if url else "")
     )
 
 
@@ -89,10 +91,10 @@ def _format_digest(articles, clusters, insights, trends, today) -> str:
         lines.append("<b>Top Stories (multi-source)</b>")
         for c in top_clusters:
             icon = _flag_icon(c.get("flags"))
-            kw = _esc(c["top_keywords"][0] if c.get("top_keywords") else "?")
+            heading = _esc((c.get("headline") or "Multi-source story")[:100])
             n = c.get("source_count", 1)
             summary = _esc((c.get("unified_summary") or "")[:150])
-            lines.append(f"{icon} <b>{kw}</b> ({n} sources)\n<i>{summary}</i>\n")
+            lines.append(f"{icon} <b>{heading}</b> ({n} sources)\n<i>{summary}</i>\n")
 
     # Per-category top items
     for cat_key, cat_meta in feed_cfg.items():
@@ -107,8 +109,9 @@ def _format_digest(articles, clusters, insights, trends, today) -> str:
             icon = _flag_icon(a.get("flags"))
             title = _esc((a.get("title") or "?")[:80])
             source = _esc(a.get("source") or "?")
-            url = _esc(a.get("url"))
-            lines.append(f'{icon} <a href="{url}">{title}</a> <i>{source}</i>')
+            url = _esc(safe_url(a.get("url")))
+            link = f'<a href="{url}">{title}</a>' if url else title
+            lines.append(f"{icon} {link} <i>{source}</i>")
         lines.append("")
 
     # Trends
@@ -147,7 +150,9 @@ def send_digest(articles, clusters, insights, trends):
         log.info("Telegram output disabled — skipping")
         return
 
-    today = datetime.utcnow().date().isoformat()
+    # The configured timezone, as the email and Obsidian note use: UTC put
+    # the morning digest on yesterday's date anywhere ahead of UTC.
+    today = config.local_now().date().isoformat()
     try:
         text = _format_digest(articles, clusters, insights, trends, today)
         _send(text)
