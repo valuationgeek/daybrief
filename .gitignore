@@ -12,7 +12,6 @@ env/
 # IDE config files
 .vscode/
 .idea/
-.claude/
 
 # Operating system files
 Thumbs.db
