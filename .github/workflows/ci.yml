@@ -25,3 +25,21 @@ jobs:
       - run: 'pip install --require-hashes --only-binary :all: -r requirements-ci.lock'
       - run: ruff check .
       - run: pytest -q
+
+  # Fails a pull request whose commits match the repository variable
+  # BLOCKED_COMMIT_IDENTITIES (Settings → Secrets and variables → Actions →
+  # Variables): a regex checked against author, committer and message lines.
+  # The list lives in the variable, so this public file names no one.
+  commit-identities:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check commit identities and trailers
+        env:
+          BLOCKED_COMMIT_IDENTITIES: ${{ vars.BLOCKED_COMMIT_IDENTITIES }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 tools/check_commits.py "$BASE" "$HEAD"
