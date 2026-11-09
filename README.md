@@ -74,6 +74,8 @@ rss_feeds:
 
 That's the whole thing. Category order in `feeds.yaml` sets display order. A new category automatically gets the `default` score barrier and display limit; to tune them, add your category key under `score_barriers:` and `max_solo_per_category:` in `config/sources.yaml` (the pipeline logs a reminder at startup). So adding a `sports` or `health` section is a one-file edit.
 
+Feeds in other languages work too: set `language` (e.g. `"zh"`). Their stories stay in their own language with no translation. The digest shows the article's opening rather than an LLM summary, and they aren't clustered with other stories.
+
 ### Tune the scoring
 
 `config/sources.yaml` controls everything about ranking: the source-credibility table, the composite score weights (must sum to 1.0), per-section score barriers (raise a barrier to make a section more selective), and trend-detection sensitivity.
@@ -91,13 +93,24 @@ The `openai` provider speaks the standard chat-completions format, so it isn't l
 
 Want a provider that doesn't speak the OpenAI format? The provider seam is one small module, `agent/llm.py` — adding one is a small, self-contained PR.
 
+## Built to run unattended
+
+daybrief reads text and links chosen by whoever runs each feed, and it usually runs while you're asleep. So:
+
+- **A bad night still produces a digest.** If the LLM stops answering, the remaining stories get extractive summaries, and one call a minute checks whether it's back. One unreachable site, paywall or malformed link costs that article, not the run.
+- **An email is never sent twice.** A send that may already have been delivered is logged for you to check instead of retried.
+- **Feed links can't reach your own network.** Feeds and article pages are fetched over http(s) only, and addresses on your local network or this machine are refused, on every redirect. Downloads are capped in size and time.
+- **Feed and LLM text can't inject anything.** It's escaped in the Obsidian note, the email and Telegram, and only http(s) links are kept, so a feed can't add scripts, embeds or `javascript:` links.
+- **Your keys stay out of logs.** API keys and tokens are masked in the log file and in the stored run history.
+- **What gets installed is pinned.** The embedding model is fixed to a reviewed revision. The GitHub Actions workflows install exact, hash-checked package versions from lock files, so a compromised or broken release can't slip into a cloud run.
+
 ## How it works
 
 Six-stage pipeline, orchestrated by `main.py` — collect → preprocess → analyze → fuse → score → decide, then render outputs. The interesting design decisions (why scoring runs twice, why trend detection uses a spike ratio instead of a z-score, the article-dict contract) are documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). CI runs ruff + an offline test suite; `python quick_test.py` is the live diagnostic harness.
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). CI runs ruff and the offline test suite on Linux and Windows; `python quick_test.py` is the live diagnostic harness. Changing a dependency means regenerating the locks; CONTRIBUTING.md explains how.
 
 ## License
 
